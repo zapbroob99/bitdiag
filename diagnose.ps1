@@ -3,10 +3,10 @@
     BitLocker readiness and troubleshooting diagnostics.
 
 .PARAMETER DriveLetters
-    Drive letters to check. Defaults to C and D.
+    Drive letters to check. By default, detected fixed and removable volumes are checked.
 
 .PARAMETER AllDrives
-    Automatically checks detected fixed and removable volumes with drive letters.
+    Automatically checks detected fixed and removable volumes with drive letters. This is the default when no drive letters are specified.
 
 .PARAMETER OutputFormat
     Chooses Console, Json, Html, or None output.
@@ -36,7 +36,7 @@
 [CmdletBinding()]
 param(
     [Alias("Drive", "Drives")]
-    [string[]]$DriveLetters = @("C", "D"),
+    [string[]]$DriveLetters,
 
     [switch]$AllDrives,
 
@@ -300,7 +300,7 @@ function Get-DetectedDriveLetters {
                 $_.FileSystem
             } |
             Sort-Object DriveLetter |
-            ForEach-Object { $_.DriveLetter.ToUpperInvariant() } |
+            ForEach-Object { ([string]$_.DriveLetter).ToUpperInvariant() } |
             Select-Object -Unique
     } catch {
         New-CheckResult `
@@ -308,7 +308,7 @@ function Get-DetectedDriveLetters {
             -CheckName "Drive discovery" `
             -Status "Warning" `
             -Message "Automatic drive discovery failed: $($_.Exception.Message)" `
-            -Fix "Run as administrator or pass drive letters explicitly with -DriveLetters C,D."
+            -Fix "Run as administrator or pass drive letters explicitly with -DriveLetters C."
     }
 }
 
@@ -355,13 +355,18 @@ function Show-Usage {
     Write-ConsoleBanner -UseColor $UseColor
     Write-ConsoleLine -Message "" -UseColor $UseColor
     Write-ConsoleLine -Message "Usage:" -ForegroundColor Cyan -UseColor $UseColor
-    Write-ConsoleLine -Message "  .\diagnose.ps1 [-Drives C,D] [-AllDrives] [-ProblemsOnly] [-Detailed]" -UseColor $UseColor
-    Write-ConsoleLine -Message "  .\diagnose.ps1 -Format Json|Html -OutFile .\report.json [-ProblemsOnly]" -UseColor $UseColor
+    Write-ConsoleLine -Message "  .\diagnose.ps1" -UseColor $UseColor
+    Write-ConsoleLine -Message "  .\diagnose.ps1 -Drives C,D -ProblemsOnly -Detailed" -UseColor $UseColor
+    Write-ConsoleLine -Message "  .\diagnose.ps1 -AllDrives -ProblemsOnly" -UseColor $UseColor
+    Write-ConsoleLine -Message "  .\diagnose.ps1 -Format Json -OutFile .\report.json -ProblemsOnly" -UseColor $UseColor
+    Write-ConsoleLine -Message "  .\diagnose.ps1 -Format Html -OutFile .\report.html -ProblemsOnly" -UseColor $UseColor
     Write-ConsoleLine -Message "  .\diagnose.ps1 -Category Platform,BitLocker -Status Warning,Alert,Error" -UseColor $UseColor
     Write-ConsoleLine -Message "" -UseColor $UseColor
+    Write-ConsoleLine -Message "Note: Do not type square brackets from documentation syntax; they only mean optional." -ForegroundColor Gray -UseColor $UseColor
+    Write-ConsoleLine -Message "" -UseColor $UseColor
     Write-ConsoleLine -Message "Options:" -ForegroundColor Cyan -UseColor $UseColor
-    Write-ConsoleLine -Message "  -Drives, -DriveLetters    Drive letters to inspect. Default: C,D" -UseColor $UseColor
-    Write-ConsoleLine -Message "  -AllDrives                Discover fixed/removable volumes automatically" -UseColor $UseColor
+    Write-ConsoleLine -Message "  -Drives, -DriveLetters    Drive letters to inspect. Default: detected drives" -UseColor $UseColor
+    Write-ConsoleLine -Message "  -AllDrives                Discover fixed/removable volumes automatically; default when -Drives is omitted" -UseColor $UseColor
     Write-ConsoleLine -Message "  -Format, -OutputFormat    Console, Json, Html, or None" -UseColor $UseColor
     Write-ConsoleLine -Message "  -OutFile, -OutputPath     Report destination for Json/Html" -UseColor $UseColor
     Write-ConsoleLine -Message "  -Category                 Runtime, Platform, Disk, Policy, Volume, BitLocker" -UseColor $UseColor
@@ -630,20 +635,43 @@ function Test-DiskDynamic {
         $disks = Get-Disk -ErrorAction Stop
         foreach ($disk in $disks) {
             $dynamicProperty = $disk.PSObject.Properties["IsDynamic"]
-            if ($null -eq $dynamicProperty) {
-                New-CheckResult -Category "Disk" -CheckName "Disk $($disk.Number) type" -Status "Info" -Message "Dynamic disk flag is not exposed by Get-Disk on this system."
-                continue
+            $isDynamic = $false
+            $dynamicDetails = @()
+
+            if ($null -ne $dynamicProperty) {
+                $isDynamic = [bool]$disk.IsDynamic
+                $dynamicDetails += "Get-Disk IsDynamic=$($disk.IsDynamic)"
+            } else {
+                $partitions = @(Get-Partition -DiskNumber $disk.Number -ErrorAction Stop)
+                $dynamicPartitions = @(
+                    $partitions | Where-Object {
+                        $_.GptType -in @(
+                            "{5808C8AA-7E8F-42E0-85D2-E1E90434CFB3}",
+                            "{AF9B60A0-1431-4F62-BC68-3311714A69AD}"
+                        ) -or
+                        $_.Type -match "Dynamic|Logical Disk Manager|LDM"
+                    }
+                )
+
+                $isDynamic = $dynamicPartitions.Count -gt 0
+                $dynamicDetails += "Dynamic markers found in partitions: $($dynamicPartitions.Count)"
             }
 
-            if ($disk.IsDynamic) {
+            if ($isDynamic) {
                 New-CheckResult `
                     -Category "Disk" `
                     -CheckName "Disk $($disk.Number) type" `
                     -Status "Warning" `
                     -Message "Disk $($disk.Number) is Dynamic." `
-                    -Fix "Use a Basic disk for BitLocker OS volume scenarios."
+                    -Fix "Use a Basic disk for BitLocker OS volume scenarios." `
+                    -Details $dynamicDetails
             } else {
-                New-CheckResult -Category "Disk" -CheckName "Disk $($disk.Number) type" -Status "OK" -Message "Disk $($disk.Number) is Basic."
+                New-CheckResult `
+                    -Category "Disk" `
+                    -CheckName "Disk $($disk.Number) type" `
+                    -Status "OK" `
+                    -Message "Disk $($disk.Number) appears to be Basic; no dynamic disk markers were found." `
+                    -Details $dynamicDetails
             }
         }
     } catch {
@@ -925,6 +953,214 @@ function Test-BitLockerPolicy {
     }
 }
 
+function Get-DriveResult {
+    param(
+        [object[]]$Results,
+        [string]$DriveLetter,
+        [string]$NamePattern
+    )
+
+    $Results |
+        Where-Object { $_.CheckName -like "${DriveLetter}: $NamePattern" } |
+        Select-Object -First 1
+}
+
+function Get-DriveOverviewValue {
+    param(
+        [object]$Result,
+        [string]$Kind
+    )
+
+    if (-not $Result) {
+        return "Unknown"
+    }
+
+    if ($Result.Message -match "was not found") {
+        return "Not found"
+    }
+
+    switch ($Kind) {
+        "FileSystem" {
+            if ($Result.Details) {
+                return [string]$Result.Details
+            }
+        }
+        "Encryption" {
+            if ($Result.Status -eq "OK") {
+                return "Yes"
+            }
+
+            if ($Result.Status -eq "Warning" -and $Result.Message -match "not encrypted") {
+                return "No"
+            }
+
+            if ($Result.Details) {
+                return [string]$Result.Details
+            }
+        }
+        "Protection" {
+            if ($Result.Status -eq "OK") {
+                return "On"
+            }
+
+            if ($Result.Message -match "protection is (.+)\.?$") {
+                return $Matches[1].TrimEnd(".")
+            }
+        }
+        "Recovery" {
+            if ($Result.Status -eq "OK") {
+                return "Present"
+            }
+
+            if ($Result.Status -in @("Warning", "Alert", "Error")) {
+                return "Missing"
+            }
+        }
+        "AutoUnlock" {
+            if ($Result.Status -eq "OK") {
+                return "On"
+            }
+
+            if ($Result.Status -eq "Warning") {
+                return "Off"
+            }
+        }
+    }
+
+    if ($Result.Status -eq "Error") {
+        return "Error"
+    }
+
+    "Unknown"
+}
+
+function Get-WorstStatus {
+    param([object[]]$Results)
+
+    if ($Results | Where-Object { $_.Status -in @("Alert", "Error") }) {
+        return "Error"
+    }
+
+    if ($Results | Where-Object { $_.Status -eq "Warning" }) {
+        return "Warning"
+    }
+
+    if ($Results | Where-Object { $_.Status -eq "Info" }) {
+        return "Info"
+    }
+
+    "OK"
+}
+
+function Write-DriveOverview {
+    param(
+        [object[]]$AllResults,
+        [string[]]$DriveLetters,
+        [int]$Width,
+        [bool]$UseColor = $true
+    )
+
+    if (-not $DriveLetters -or $DriveLetters.Count -eq 0) {
+        return
+    }
+
+    $driveWidth = 7
+    $encryptedWidth = 12
+    $protectionWidth = 12
+    $recoveryWidth = 12
+    $autoUnlockWidth = 12
+    $fileSystemWidth = [Math]::Max(10, $Width - $driveWidth - $encryptedWidth - $protectionWidth - $recoveryWidth - $autoUnlockWidth - 12)
+
+    Write-ConsoleLine -Message "" -UseColor $UseColor
+    Write-ConsoleLine -Message "Drive BitLocker overview" -ForegroundColor Cyan -UseColor $UseColor
+    Write-Rule -Width $Width -UseColor $UseColor
+
+    $header = "{0}  {1}  {2}  {3}  {4}  {5}" -f `
+        (Format-ColumnText -Text "Drive" -Width $driveWidth),
+        (Format-ColumnText -Text "Encrypted" -Width $encryptedWidth),
+        (Format-ColumnText -Text "Protection" -Width $protectionWidth),
+        (Format-ColumnText -Text "Recovery" -Width $recoveryWidth),
+        (Format-ColumnText -Text "AutoUnlock" -Width $autoUnlockWidth),
+        (Format-ColumnText -Text "FileSystem" -Width $fileSystemWidth)
+    Write-ConsoleLine -Message $header -ForegroundColor Cyan -UseColor $UseColor
+    Write-Rule -Width $Width -UseColor $UseColor
+
+    foreach ($driveLetter in $DriveLetters) {
+        $fileSystem = Get-DriveResult -Results $AllResults -DriveLetter $driveLetter -NamePattern "filesystem"
+        $encryption = Get-DriveResult -Results $AllResults -DriveLetter $driveLetter -NamePattern "encryption"
+        if (-not $encryption) {
+            $encryption = Get-DriveResult -Results $AllResults -DriveLetter $driveLetter -NamePattern "BitLocker"
+        }
+
+        $protection = Get-DriveResult -Results $AllResults -DriveLetter $driveLetter -NamePattern "protection"
+        $recovery = Get-DriveResult -Results $AllResults -DriveLetter $driveLetter -NamePattern "recovery password"
+        $autoUnlock = Get-DriveResult -Results $AllResults -DriveLetter $driveLetter -NamePattern "auto-unlock"
+        $status = Get-WorstStatus -Results @($fileSystem, $encryption, $protection, $recovery, $autoUnlock)
+
+        $row = "{0}  {1}  {2}  {3}  {4}  {5}" -f `
+            (Format-ColumnText -Text "${driveLetter}:" -Width $driveWidth),
+            (Format-ColumnText -Text (Get-DriveOverviewValue -Result $encryption -Kind "Encryption") -Width $encryptedWidth),
+            (Format-ColumnText -Text (Get-DriveOverviewValue -Result $protection -Kind "Protection") -Width $protectionWidth),
+            (Format-ColumnText -Text (Get-DriveOverviewValue -Result $recovery -Kind "Recovery") -Width $recoveryWidth),
+            (Format-ColumnText -Text (Get-DriveOverviewValue -Result $autoUnlock -Kind "AutoUnlock") -Width $autoUnlockWidth),
+            (Format-ColumnText -Text (Get-DriveOverviewValue -Result $fileSystem -Kind "FileSystem") -Width $fileSystemWidth)
+
+        Write-ConsoleLine -Message $row -ForegroundColor (Get-StatusColor -Status $status) -UseColor $UseColor
+    }
+
+    Write-Rule -Width $Width -UseColor $UseColor
+}
+
+function Get-ResultSectionName {
+    param([object]$Result)
+
+    if ($Result.CheckName -match "^([A-Z]):") {
+        return "$($Matches[1]): Volume / BitLocker"
+    }
+
+    switch ($Result.Category) {
+        "Runtime"  { "System" }
+        "Platform" { "System" }
+        "Disk"     { "Disk layout" }
+        "Policy"   { "Policy" }
+        "Volume"   { "Other volumes" }
+        "BitLocker" { "Other BitLocker" }
+        default    { $Result.Category }
+    }
+}
+
+function Write-ResultRows {
+    param(
+        [object[]]$Results,
+        [int]$StatusWidth,
+        [int]$CategoryWidth,
+        [int]$CheckWidth,
+        [int]$MessageWidth,
+        [switch]$Detailed,
+        [bool]$UseColor = $true
+    )
+
+    foreach ($result in $Results) {
+        $colorName = Get-StatusColor -Status $result.Status
+        $row = "{0}  {1}  {2}  {3}" -f `
+            (Format-ColumnText -Text (Format-StatusLabel -Status $result.Status) -Width $StatusWidth),
+            (Format-ColumnText -Text $result.Category -Width $CategoryWidth),
+            (Format-ColumnText -Text $result.CheckName -Width $CheckWidth),
+            (Format-ColumnText -Text $result.Message -Width $MessageWidth)
+
+        Write-ConsoleLine -Message $row -ForegroundColor $colorName -UseColor $UseColor
+
+        if ($result.Fix) {
+            Write-ConsoleLine -Message ("  fix      {0}" -f $result.Fix) -ForegroundColor DarkYellow -UseColor $UseColor
+        }
+
+        if ($Detailed -and $null -ne $result.Details) {
+            $detailText = $result.Details | ConvertTo-Json -Depth 6 -Compress
+            Write-ConsoleLine -Message ("  details  {0}" -f $detailText) -ForegroundColor DarkGray -UseColor $UseColor
+        }
+    }
+}
+
 function Write-ConsoleReport {
     param(
         [object[]]$Results,
@@ -946,6 +1182,7 @@ function Write-ConsoleReport {
     Write-ConsoleLine -Message ("Target drives : {0}" -f ($DriveLetters -join ", ")) -ForegroundColor Gray -UseColor $UseColor
     Write-ConsoleLine -Message ("Results       : {0} shown / {1} collected" -f $Results.Count, $AllResults.Count) -ForegroundColor Gray -UseColor $UseColor
     Write-StatusSummary -Results $AllResults -UseColor $UseColor
+    Write-DriveOverview -AllResults $AllResults -DriveLetters $DriveLetters -Width $tableWidth -UseColor $UseColor
 
     if (-not $Results -or $Results.Count -eq 0) {
         Write-ConsoleLine -Message "" -UseColor $UseColor
@@ -962,26 +1199,45 @@ function Write-ConsoleReport {
         (Format-ColumnText -Text "Check" -Width $checkWidth),
         (Format-ColumnText -Text "Message" -Width $messageWidth)
     Write-ConsoleLine -Message $header -ForegroundColor Cyan -UseColor $UseColor
-    Write-Rule -Width $tableWidth -UseColor $UseColor
 
-    foreach ($result in $Results) {
-        $colorName = Get-StatusColor -Status $result.Status
-        $row = "{0}  {1}  {2}  {3}" -f `
-            (Format-ColumnText -Text (Format-StatusLabel -Status $result.Status) -Width $statusWidth),
-            (Format-ColumnText -Text $result.Category -Width $categoryWidth),
-            (Format-ColumnText -Text $result.CheckName -Width $checkWidth),
-            (Format-ColumnText -Text $result.Message -Width $messageWidth)
+    $sectionNames = @("System", "Disk layout", "Policy")
+    foreach ($driveLetter in $DriveLetters) {
+        $sectionNames += "${driveLetter}: Volume / BitLocker"
+    }
+    $sectionNames += @("Other volumes", "Other BitLocker")
 
-        Write-ConsoleLine -Message $row -ForegroundColor $colorName -UseColor $UseColor
-
-        if ($result.Fix) {
-            Write-ConsoleLine -Message ("  fix      {0}" -f $result.Fix) -ForegroundColor DarkYellow -UseColor $UseColor
+    $writtenSections = @()
+    foreach ($sectionName in $sectionNames) {
+        $sectionResults = @($Results | Where-Object { (Get-ResultSectionName -Result $_) -eq $sectionName })
+        if (-not $sectionResults -or $sectionResults.Count -eq 0) {
+            continue
         }
 
-        if ($Detailed -and $null -ne $result.Details) {
-            $detailText = $result.Details | ConvertTo-Json -Depth 6 -Compress
-            Write-ConsoleLine -Message ("  details  {0}" -f $detailText) -ForegroundColor DarkGray -UseColor $UseColor
-        }
+        Write-Rule -Width $tableWidth -UseColor $UseColor
+        Write-ConsoleLine -Message $sectionName -ForegroundColor Cyan -UseColor $UseColor
+        Write-ResultRows `
+            -Results $sectionResults `
+            -StatusWidth $statusWidth `
+            -CategoryWidth $categoryWidth `
+            -CheckWidth $checkWidth `
+            -MessageWidth $messageWidth `
+            -Detailed:$Detailed `
+            -UseColor $UseColor
+        $writtenSections += $sectionName
+    }
+
+    $remainingResults = @($Results | Where-Object { (Get-ResultSectionName -Result $_) -notin $writtenSections })
+    if ($remainingResults -and $remainingResults.Count -gt 0) {
+        Write-Rule -Width $tableWidth -UseColor $UseColor
+        Write-ConsoleLine -Message "Other" -ForegroundColor Cyan -UseColor $UseColor
+        Write-ResultRows `
+            -Results $remainingResults `
+            -StatusWidth $statusWidth `
+            -CategoryWidth $categoryWidth `
+            -CheckWidth $checkWidth `
+            -MessageWidth $messageWidth `
+            -Detailed:$Detailed `
+            -UseColor $UseColor
     }
 
     Write-Rule -Width $tableWidth -UseColor $UseColor
@@ -1084,19 +1340,27 @@ if ($Help) {
 }
 
 $driveDiscoveryResults = @()
-if ($AllDrives) {
+$driveLettersSpecified = $PSBoundParameters.ContainsKey("DriveLetters")
+if ($AllDrives -or -not $driveLettersSpecified) {
     $detectedDrives = @(Get-DetectedDriveLetters)
     $driveDiscoveryResults = @($detectedDrives | Where-Object { $_.PSObject.Properties["Category"] })
     $normalizedDriveLetters = @($detectedDrives | Where-Object { $_ -is [string] })
 
     if (-not $normalizedDriveLetters -or $normalizedDriveLetters.Count -eq 0) {
-        $normalizedDriveLetters = ConvertTo-DriveLetter -Letters $DriveLetters
+        if ($driveLettersSpecified) {
+            $normalizedDriveLetters = ConvertTo-DriveLetter -Letters $DriveLetters
+        } elseif ($env:SystemDrive) {
+            $normalizedDriveLetters = ConvertTo-DriveLetter -Letters $env:SystemDrive
+        } else {
+            $normalizedDriveLetters = @("C")
+        }
+
         $driveDiscoveryResults += New-CheckResult `
             -Category "Runtime" `
             -CheckName "Drive discovery" `
             -Status "Warning" `
-            -Message "No drives were discovered automatically; falling back to explicit drive letters." `
-            -Fix "Pass drive letters explicitly with -DriveLetters C,D."
+            -Message "No drives were discovered automatically; falling back to $($normalizedDriveLetters -join ', ')." `
+            -Fix "Run as administrator or pass drive letters explicitly with -DriveLetters C."
     }
 } else {
     $normalizedDriveLetters = ConvertTo-DriveLetter -Letters $DriveLetters
