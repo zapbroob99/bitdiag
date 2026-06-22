@@ -74,7 +74,7 @@ You can run the CLI directly from the repository:
 Or import the module manually:
 
 ```powershell
-Import-Module .\BitDiag\BitDiag.psd1
+Import-Module .\BitDiag\BitDiag.psd1 -DisableNameChecking
 bitdiag -Run
 ```
 
@@ -157,10 +157,24 @@ Filter by category and status:
 bitdiag -Category Platform,BitLocker -Status Warning,Alert,Error
 ```
 
+Write a Power BI-friendly NDJSON report for SCCM-triggered fleet reporting:
+
+```powershell
+bitdiag -EnterpriseReport -OutDirectory "\\server\share\BitDiag" -Quiet -NoExitCode
+```
+
 Generate a remediation plan without changing the system:
 
 ```powershell
 bitdiag -PlanFixes
+```
+
+The remediation plan classifies each item by action type, reason type, risk level, and whether it is safe to apply automatically:
+
+```text
+[AutomaticCandidate / MissingProtector / Low]
+[Manual / Platform / High]
+[Review / Policy / Medium]
 ```
 
 Preview safe automatic fixes without changing the system:
@@ -173,6 +187,24 @@ Apply only safe automatic fixes:
 
 ```powershell
 bitdiag -Fix -Apply
+```
+
+Show which unencrypted fixed drives can have BitLocker enabled:
+
+```powershell
+bitdiag -EnableBitLocker
+```
+
+Preview BitLocker enablement without changing the system:
+
+```powershell
+bitdiag -EnableBitLocker -WhatIf
+```
+
+Start BitLocker on eligible unencrypted fixed drives:
+
+```powershell
+bitdiag -EnableBitLocker -Apply
 ```
 
 Use results in a PowerShell pipeline:
@@ -212,8 +244,11 @@ D: Volume / BitLocker
 | `-Version` | Show the installed BitDiag version. |
 | `-PlanFixes` | Generate a remediation plan without changing the system. |
 | `-Fix` | Prepare safe automatic remediation candidates. Does not change the system by itself. |
-| `-Apply` | Execute safe automatic remediation candidates with `-Fix`. |
-| `-WhatIf` | Preview `-Fix` actions without changing the system. |
+| `-Apply` | Execute safe automatic remediation candidates with `-Fix` or start eligible `-EnableBitLocker` actions. |
+| `-EnableBitLocker` | Prepare BitLocker enablement for eligible unencrypted fixed drives. Requires `-Apply` to start encryption. |
+| `-WhatIf` | Preview `-Fix` or `-EnableBitLocker` actions without changing the system. |
+| `-EnterpriseReport` | Write flat NDJSON for SCCM-triggered Power BI reporting. |
+| `-OutDirectory` | Directory or share path for enterprise NDJSON output. |
 | `-Drives`, `-DriveLetters` | Drive letters to inspect. If omitted, detected fixed/removable drives are checked automatically. |
 | `-AllDrives` | Discover fixed/removable volumes automatically. This is also the default when `-Drives` is omitted. |
 | `-Format`, `-OutputFormat` | Output format: `Console`, `Json`, `Html`, or `None`. |
@@ -247,6 +282,30 @@ Run the basic smoke test script from the repository root:
 
 The smoke tests validate module import, version output, help output, the backward-compatible wrapper, remediation plan generation, and safe-fix preview.
 
+## SCCM and Power BI Reporting
+
+Use SCCM only to run BitDiag on endpoints. Let BitDiag write Power BI-friendly NDJSON files to a central SMB share:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\bitdiag.ps1 -Run -EnterpriseReport -OutDirectory "\\server\share\BitDiag" -Quiet -NoExitCode
+```
+
+Each output file is named with computer name, device GUID, and timestamp:
+
+```text
+<ComputerName>_<DeviceGuid>_<yyyyMMdd-HHmmss>.ndjson
+```
+
+Each line is one finding with stable columns for Power BI:
+
+```text
+RunId, TimestampUtc, ComputerName, Domain, DeviceGuid, UserContext,
+BitDiagVersion, DriveLetter, Category, CheckName, Status, Message,
+Fix, ReasonType, RiskLevel, CanApply, ExitCode
+```
+
+BitDiag writes to a local temp file, copies to a remote `.tmp` file, then renames to final `.ndjson`. This prevents Power BI from reading half-written files. Enterprise export intentionally excludes raw `Details` values and does not export recovery passwords.
+
 ## Safe Remediation
 
 `bitdiag -Fix -Apply` is intentionally limited to low-risk actions:
@@ -256,6 +315,52 @@ The smoke tests validate module import, version output, help output, the backwar
 - Enable auto-unlock for data drives.
 
 BitDiag does not automatically change firmware settings, convert MBR/GPT layouts, edit BitLocker policy registry values, or enable Secure Boot. Those items remain manual or review-only recommendations.
+
+## Enabling BitLocker
+
+`bitdiag -EnableBitLocker` is intentionally separate from `-Fix` because starting disk encryption is a higher-impact action. By default it only shows an enablement plan.
+
+Use `-Apply` to start encryption:
+
+```powershell
+bitdiag -EnableBitLocker -Apply
+```
+
+BitDiag keeps this flow simple:
+
+- Fixed local drives only.
+- Removable drives are skipped.
+- Already encrypted drives are skipped.
+- Default encryption is `XtsAes256` with used-space-only encryption.
+- OS drive enablement requires administrator rights, UEFI boot mode, and a ready TPM.
+- Data drive enablement uses a recovery password protector.
+- Data drive enablement also enables auto-unlock when the OS drive is already fully protected.
+- OS drive enablement uses a TPM protector and then ensures a recovery password protector exists.
+
+After enabling BitLocker, confirm recovery key escrow in your organization-approved location.
+
+## Troubleshooting Coverage
+
+BitDiag focuses on the common cases that block BitLocker enablement or make protected data drives hard to use:
+
+- TPM missing, disabled, not ready, or incompatible with the current boot mode.
+- Legacy BIOS instead of UEFI for modern TPM-based BitLocker.
+- Secure Boot disabled or unavailable.
+- Missing or invalid EFI System Partition, with a manual `bdecfg -target default -size 550` repair recommendation.
+- Dynamic disk markers.
+- Active MBR partitions, including the drive letter when Windows exposes it.
+- Large unallocated disk ranges or disks without partitions.
+- Unsupported filesystems such as ExFAT/ReFS for fixed BitLocker volumes.
+- Unencrypted volumes that are candidates for `-EnableBitLocker`.
+- Missing recovery password protectors.
+- Suspended/off BitLocker protection.
+- Missing data-drive auto-unlock.
+- BitLocker policy registry keys under `HKLM:\SOFTWARE\Policies\Microsoft\FVE` and `HKLM:\SYSTEM\CurrentControlSet\Policies\Microsoft\FVE`.
+- Fixed/removable drive write-deny policies that can make unencrypted drives read-only.
+- AD DS recovery backup requirement policies.
+- Best-effort AD DS recovery escrow visibility by matching recovery protector IDs when directory access is available.
+
+BitDiag does not automatically perform destructive storage operations such as Dynamic-to-Basic conversion, partition deletion, formatting, or making MBR partitions inactive. Those remain manual high-risk actions in the remediation plan.
 
 ## Notes
 

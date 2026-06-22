@@ -222,6 +222,95 @@ function Get-BitDiagVersion {
     }
 }
 
+function Format-EnterpriseText {
+    param(
+        [object]$Value,
+        [int]$MaxLength = 500
+    )
+
+    if ($null -eq $Value) {
+        return ""
+    }
+
+    $text = ([string]$Value -replace "\s+", " ").Trim()
+    if ($text.Length -le $MaxLength) {
+        return $text
+    }
+
+    $text.Substring(0, $MaxLength)
+}
+
+function Get-SafeFileNamePart {
+    param([string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return "unknown"
+    }
+
+    ($Value -replace "[^A-Za-z0-9._-]", "_").Trim("_")
+}
+
+function Get-ComputerDomainName {
+    try {
+        $computerSystem = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
+        if ($computerSystem.Domain) {
+            return [string]$computerSystem.Domain
+        }
+    } catch {
+        # Fall back below.
+    }
+
+    if ($env:USERDNSDOMAIN) {
+        return [string]$env:USERDNSDOMAIN
+    }
+
+    if ($env:USERDOMAIN) {
+        return [string]$env:USERDOMAIN
+    }
+
+    "WORKGROUP"
+}
+
+function Get-BitDiagDeviceGuid {
+    $registryPath = "HKLM:\SOFTWARE\BitDiag"
+    $valueName = "DeviceGuid"
+
+    try {
+        if (-not (Test-Path $registryPath)) {
+            New-Item -Path $registryPath -Force -ErrorAction Stop | Out-Null
+        }
+
+        $existing = (Get-ItemProperty -Path $registryPath -Name $valueName -ErrorAction SilentlyContinue).$valueName
+        if ($existing) {
+            return [string]$existing
+        }
+
+        $newGuid = [guid]::NewGuid().ToString()
+        New-ItemProperty -Path $registryPath -Name $valueName -Value $newGuid -PropertyType String -Force -ErrorAction Stop | Out-Null
+        return $newGuid
+    } catch {
+        try {
+            $machineGuid = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Cryptography" -Name "MachineGuid" -ErrorAction Stop).MachineGuid
+            if ($machineGuid) {
+                return [string]$machineGuid
+            }
+        } catch {
+            # Fall back below.
+        }
+    }
+
+    "unknown"
+}
+
+function Get-EnterpriseIdentity {
+    [PSCustomObject]@{
+        ComputerName = [string]$env:COMPUTERNAME
+        Domain       = Get-ComputerDomainName
+        DeviceGuid   = Get-BitDiagDeviceGuid
+        UserContext  = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    }
+}
+
 function New-FixPlanItem {
     param(
         [Parameter(Mandatory)]
@@ -240,12 +329,23 @@ function New-FixPlanItem {
 
         [string]$Operation,
 
-        [string]$DriveLetter
+        [string]$DriveLetter,
+
+        [ValidateSet("EncryptionOff", "MissingProtector", "ProtectionOff", "AutoUnlockOff", "Platform", "DiskLayout", "Policy", "Runtime", "Other")]
+        [string]$ReasonType = "Other",
+
+        [ValidateSet("Low", "Medium", "High")]
+        [string]$RiskLevel = "Medium"
     )
+
+    $canApply = [bool]($ActionType -eq "AutomaticCandidate" -and $Operation -and $DriveLetter -and $RiskLevel -eq "Low")
 
     [PSCustomObject]@{
         Title      = $Title
         ActionType = $ActionType
+        ReasonType = $ReasonType
+        RiskLevel  = $RiskLevel
+        CanApply   = $canApply
         Reason     = $Reason
         Command    = $Command
         Notes      = $Notes
@@ -272,7 +372,9 @@ function Get-RemediationPlan {
                 -Command "Add-BitLockerKeyProtector -MountPoint ${drive}: -RecoveryPasswordProtector" `
                 -Notes "Confirm recovery key escrow requirements before or immediately after adding the protector." `
                 -Operation "AddRecoveryPassword" `
-                -DriveLetter $drive
+                -DriveLetter $drive `
+                -ReasonType "MissingProtector" `
+                -RiskLevel "Low"
             continue
         }
 
@@ -285,7 +387,9 @@ function Get-RemediationPlan {
                 -Command "Resume-BitLocker -MountPoint ${drive}:" `
                 -Notes "Only run after confirming recovery keys are backed up." `
                 -Operation "ResumeProtection" `
-                -DriveLetter $drive
+                -DriveLetter $drive `
+                -ReasonType "ProtectionOff" `
+                -RiskLevel "Low"
             continue
         }
 
@@ -298,7 +402,9 @@ function Get-RemediationPlan {
                 -Command "Resume-BitLocker -MountPoint ${drive}:" `
                 -Notes "This is safe only when recovery keys are available." `
                 -Operation "ResumeProtection" `
-                -DriveLetter $drive
+                -DriveLetter $drive `
+                -ReasonType "ProtectionOff" `
+                -RiskLevel "Low"
             continue
         }
 
@@ -311,7 +417,9 @@ function Get-RemediationPlan {
                 -Command "Enable-BitLockerAutoUnlock -MountPoint ${drive}:" `
                 -Notes "Use for data drives only, after the OS drive is protected." `
                 -Operation "EnableAutoUnlock" `
-                -DriveLetter $drive
+                -DriveLetter $drive `
+                -ReasonType "AutoUnlockOff" `
+                -RiskLevel "Low"
             continue
         }
 
@@ -320,7 +428,33 @@ function Get-RemediationPlan {
                 -Title "Review Secure Boot configuration" `
                 -ActionType "Manual" `
                 -Reason $result.Message `
-                -Notes "Secure Boot must be changed in firmware/UEFI settings; do not automate this from BitDiag."
+                -Notes "Secure Boot must be changed in firmware/UEFI settings; do not automate this from BitDiag." `
+                -ReasonType "Platform" `
+                -RiskLevel "High"
+            continue
+        }
+
+        if ($result.CheckName -match "EFI System Partition|^ESP on" -and $result.Status -in @("Warning", "Alert", "Error")) {
+            $plan += New-FixPlanItem `
+                -Title "Repair or create EFI System Partition" `
+                -ActionType "Manual" `
+                -Reason $result.Message `
+                -Command "bdecfg -target default -size 550" `
+                -Notes "Validate backups first. If the OS volume cannot shrink, review Event Viewer and move or back up blocking files before retrying." `
+                -ReasonType "DiskLayout" `
+                -RiskLevel "High"
+            continue
+        }
+
+        if ($result.CheckName -match "active MBR partition" -and $result.Status -in @("Warning", "Alert", "Error")) {
+            $plan += New-FixPlanItem `
+                -Title "Review active MBR partition on secondary disk" `
+                -ActionType "Manual" `
+                -Reason $result.Message `
+                -Command "diskpart -> select disk X -> list partition -> select partition Y -> inactive" `
+                -Notes "Only make a partition inactive after confirming it is not required for boot and backups exist." `
+                -ReasonType "DiskLayout" `
+                -RiskLevel "High"
             continue
         }
 
@@ -329,7 +463,9 @@ function Get-RemediationPlan {
                 -Title "Review boot and disk layout before changing firmware or partitioning" `
                 -ActionType "Manual" `
                 -Reason $result.Message `
-                -Notes "MBR/GPT conversion, firmware mode changes, and boot partition changes require a separate backup and migration plan."
+                -Notes "MBR/GPT conversion, firmware mode changes, and boot partition changes require a separate backup and migration plan." `
+                -ReasonType "DiskLayout" `
+                -RiskLevel "High"
             continue
         }
 
@@ -338,21 +474,379 @@ function Get-RemediationPlan {
                 -Title "Review BitLocker policy" `
                 -ActionType "Review" `
                 -Reason $result.Message `
-                -Notes "Policy is usually managed by Group Policy or MDM; review the source of authority before editing registry values."
+                -Notes "Policy is usually managed by Group Policy or MDM; review the source of authority before editing registry values." `
+                -ReasonType "Policy" `
+                -RiskLevel "Medium"
             continue
         }
 
         if ($result.Fix) {
+            $reasonType = if ($result.Category -eq "Runtime") { "Runtime" } else { "Other" }
             $plan += New-FixPlanItem `
                 -Title $result.CheckName `
                 -ActionType "Review" `
                 -Reason $result.Message `
                 -Command $result.Fix `
-                -Notes "Review this recommendation before applying it."
+                -Notes "Review this recommendation before applying it." `
+                -ReasonType $reasonType `
+                -RiskLevel "Medium"
         }
     }
 
     $plan | Sort-Object Title, ActionType -Unique
+}
+
+function New-BitLockerEnablePlanItem {
+    param(
+        [Parameter(Mandatory)]
+        [string]$DriveLetter,
+
+        [Parameter(Mandatory)]
+        [string]$Title,
+
+        [Parameter(Mandatory)]
+        [ValidateSet("AutomaticCandidate", "Manual", "Review")]
+        [string]$ActionType,
+
+        [Parameter(Mandatory)]
+        [string]$Reason,
+
+        [string]$Command,
+
+        [string]$Notes,
+
+        [bool]$EnableAutoUnlock = $false,
+
+        [ValidateSet("EncryptionOff", "Platform", "DiskLayout", "Runtime", "Other")]
+        [string]$ReasonType = "EncryptionOff",
+
+        [ValidateSet("Low", "Medium", "High")]
+        [string]$RiskLevel = "Medium",
+
+        [bool]$CanApply = $false,
+
+        [bool]$IsSystemDrive = $false
+    )
+
+    [PSCustomObject]@{
+        Title         = $Title
+        ActionType    = $ActionType
+        ReasonType    = $ReasonType
+        RiskLevel     = $RiskLevel
+        CanApply      = $CanApply
+        Reason        = $Reason
+        Command       = $Command
+        Notes         = $Notes
+        Operation     = "EnableBitLocker"
+        DriveLetter   = $DriveLetter
+        IsSystemDrive = $IsSystemDrive
+        EnableAutoUnlock = $EnableAutoUnlock
+    }
+}
+
+function Get-LogicalDiskInfo {
+    param([string]$DriveLetter)
+
+    try {
+        Get-CimInstance -ClassName Win32_LogicalDisk -Filter ("DeviceID='{0}:'" -f $DriveLetter) -ErrorAction Stop
+    } catch {
+        $null
+    }
+}
+
+function Get-BitLockerEnablePlan {
+    param(
+        [string[]]$DriveLetters,
+        [object[]]$Results,
+        [string]$BootMode,
+        [object]$TpmState
+    )
+
+    $plan = @()
+    $adminOk = -not ($Results | Where-Object { $_.Category -eq "Runtime" -and $_.CheckName -eq "Administrator" -and $_.Status -ne "OK" })
+    $enableCommandAvailable = [bool](Get-Command Enable-BitLocker -ErrorAction SilentlyContinue)
+    $systemDrive = if ($env:SystemDrive) { $env:SystemDrive.TrimEnd(":").ToUpperInvariant() } else { "C" }
+    $canAutoUnlockDataDrives = $false
+    try {
+        $osVolume = Get-BitLockerVolume -MountPoint "${systemDrive}:" -ErrorAction Stop
+        $canAutoUnlockDataDrives = ($osVolume.VolumeStatus -eq "FullyEncrypted" -and $osVolume.ProtectionStatus -eq "On")
+    } catch {
+        $canAutoUnlockDataDrives = $false
+    }
+
+    foreach ($driveLetter in $DriveLetters) {
+        $drive = $driveLetter.Trim().TrimEnd(":").ToUpperInvariant()
+        $target = "${drive}:"
+        $isSystemDrive = ($drive -eq $systemDrive)
+
+        if (-not (Test-Path "${drive}:\")) {
+            $plan += New-BitLockerEnablePlanItem `
+                -DriveLetter $drive `
+                -Title "${drive}: skipped" `
+                -ActionType "Review" `
+                -Reason "${drive}: was not found." `
+                -Notes "BitDiag only enables BitLocker on detected local fixed drives." `
+                -ReasonType "Runtime" `
+                -RiskLevel "Low" `
+                -IsSystemDrive:$isSystemDrive
+            continue
+        }
+
+        if (-not $adminOk) {
+            $plan += New-BitLockerEnablePlanItem `
+                -DriveLetter $drive `
+                -Title "${drive}: cannot enable BitLocker without administrator rights" `
+                -ActionType "Manual" `
+                -Reason "PowerShell is not running as administrator." `
+                -Notes "Run PowerShell as Administrator, then retry the same command." `
+                -ReasonType "Runtime" `
+                -RiskLevel "Medium" `
+                -IsSystemDrive:$isSystemDrive
+            continue
+        }
+
+        if (-not $enableCommandAvailable) {
+            $plan += New-BitLockerEnablePlanItem `
+                -DriveLetter $drive `
+                -Title "${drive}: Enable-BitLocker is not available" `
+                -ActionType "Manual" `
+                -Reason "The BitLocker PowerShell cmdlet is not available in this session." `
+                -Notes "Run on Windows with the BitLocker module available." `
+                -ReasonType "Runtime" `
+                -RiskLevel "Medium" `
+                -IsSystemDrive:$isSystemDrive
+            continue
+        }
+
+        $logicalDisk = Get-LogicalDiskInfo -DriveLetter $drive
+        if ($logicalDisk -and [int]$logicalDisk.DriveType -ne 3) {
+            $plan += New-BitLockerEnablePlanItem `
+                -DriveLetter $drive `
+                -Title "${drive}: skipped non-fixed drive" `
+                -ActionType "Review" `
+                -Reason "${drive}: is not a fixed local drive." `
+                -Notes "Automatic BitLocker enablement is intentionally limited to fixed drives." `
+                -ReasonType "DiskLayout" `
+                -RiskLevel "Medium" `
+                -IsSystemDrive:$isSystemDrive
+            continue
+        }
+
+        if ($logicalDisk -and $logicalDisk.FileSystem -and $logicalDisk.FileSystem -ne "NTFS") {
+            $plan += New-BitLockerEnablePlanItem `
+                -DriveLetter $drive `
+                -Title "${drive}: unsupported filesystem" `
+                -ActionType "Manual" `
+                -Reason "${drive}: filesystem is $($logicalDisk.FileSystem), expected NTFS." `
+                -Notes "Convert or reformat the volume only through a separate storage change plan." `
+                -ReasonType "DiskLayout" `
+                -RiskLevel "High" `
+                -IsSystemDrive:$isSystemDrive
+            continue
+        }
+
+        try {
+            $volume = Get-BitLockerVolume -MountPoint $target -ErrorAction Stop
+        } catch {
+            $plan += New-BitLockerEnablePlanItem `
+                -DriveLetter $drive `
+                -Title "${drive}: BitLocker state could not be read" `
+                -ActionType "Review" `
+                -Reason $_.Exception.Message `
+                -Notes "Resolve the diagnostic error before enabling BitLocker." `
+                -ReasonType "Runtime" `
+                -RiskLevel "Medium" `
+                -IsSystemDrive:$isSystemDrive
+            continue
+        }
+
+        if ($volume.VolumeStatus -eq "FullyEncrypted") {
+            $plan += New-BitLockerEnablePlanItem `
+                -DriveLetter $drive `
+                -Title "${drive}: already encrypted" `
+                -ActionType "Review" `
+                -Reason "${drive}: is already fully encrypted." `
+                -Notes "No BitLocker enable action is needed." `
+                -ReasonType "Other" `
+                -RiskLevel "Low" `
+                -IsSystemDrive:$isSystemDrive
+            continue
+        }
+
+        if ($volume.VolumeStatus -ne "FullyDecrypted") {
+            $plan += New-BitLockerEnablePlanItem `
+                -DriveLetter $drive `
+                -Title "${drive}: encryption already in progress or partial" `
+                -ActionType "Review" `
+                -Reason "${drive}: BitLocker volume status is $($volume.VolumeStatus)." `
+                -Notes "Let the current encryption, decryption, or conversion state finish before starting a new enable action." `
+                -ReasonType "EncryptionOff" `
+                -RiskLevel "Medium" `
+                -IsSystemDrive:$isSystemDrive
+            continue
+        }
+
+        if ($isSystemDrive) {
+            if ($BootMode -ne "UEFI") {
+                $plan += New-BitLockerEnablePlanItem `
+                    -DriveLetter $drive `
+                    -Title "${drive}: review boot mode before enabling BitLocker" `
+                    -ActionType "Manual" `
+                    -Reason "The system boot mode is $BootMode." `
+                    -Notes "BitDiag only auto-enables the OS drive on UEFI systems." `
+                    -ReasonType "Platform" `
+                    -RiskLevel "High" `
+                    -IsSystemDrive:$isSystemDrive
+                continue
+            }
+
+            if (-not $TpmState -or -not $TpmState.Present -or -not ($TpmState.Ready -or ($TpmState.Enabled -and $TpmState.Activated))) {
+                $plan += New-BitLockerEnablePlanItem `
+                    -DriveLetter $drive `
+                    -Title "${drive}: TPM is not ready" `
+                    -ActionType "Manual" `
+                    -Reason "TPM is required before BitDiag can auto-enable BitLocker on the OS drive." `
+                    -Notes "Enable and initialize TPM first, then retry." `
+                    -ReasonType "Platform" `
+                    -RiskLevel "High" `
+                    -IsSystemDrive:$isSystemDrive
+                continue
+            }
+
+            $plan += New-BitLockerEnablePlanItem `
+                -DriveLetter $drive `
+                -Title "${drive}: enable BitLocker on OS drive" `
+                -ActionType "AutomaticCandidate" `
+                -Reason "${drive}: is not encrypted." `
+                -Command "Enable-BitLocker -MountPoint ${drive}: -EncryptionMethod XtsAes256 -UsedSpaceOnly -TpmProtector; Add-BitLockerKeyProtector -MountPoint ${drive}: -RecoveryPasswordProtector" `
+                -Notes "Uses TPM protector, XtsAes256, and used-space-only encryption. Confirm recovery key escrow after enabling." `
+                -ReasonType "EncryptionOff" `
+                -RiskLevel "Medium" `
+                -CanApply:$true `
+                -IsSystemDrive:$isSystemDrive
+            continue
+        }
+
+        $autoUnlockCommand = if ($canAutoUnlockDataDrives) { "; Enable-BitLockerAutoUnlock -MountPoint ${drive}:" } else { "" }
+        $autoUnlockNotes = if ($canAutoUnlockDataDrives) {
+            "Uses a recovery password protector, XtsAes256, used-space-only encryption, and enables auto-unlock because the OS drive is protected."
+        } else {
+            "Uses a recovery password protector, XtsAes256, and used-space-only encryption. Auto-unlock is skipped until the OS drive is fully protected."
+        }
+
+        $plan += New-BitLockerEnablePlanItem `
+            -DriveLetter $drive `
+            -Title "${drive}: enable BitLocker on data drive" `
+            -ActionType "AutomaticCandidate" `
+            -Reason "${drive}: is not encrypted." `
+            -Command "Enable-BitLocker -MountPoint ${drive}: -EncryptionMethod XtsAes256 -UsedSpaceOnly -RecoveryPasswordProtector$autoUnlockCommand" `
+            -Notes $autoUnlockNotes `
+            -EnableAutoUnlock:$canAutoUnlockDataDrives `
+            -ReasonType "EncryptionOff" `
+            -RiskLevel "Medium" `
+            -CanApply:$true `
+            -IsSystemDrive:$isSystemDrive
+    }
+
+    $plan
+}
+
+function Write-BitLockerEnablePlan {
+    param(
+        [object[]]$Plan,
+        [bool]$UseColor = $true
+    )
+
+    $width = Get-ConsoleWidth
+    Write-ConsoleBanner -UseColor $UseColor
+    Write-ConsoleLine -Message "" -UseColor $UseColor
+    Write-ConsoleLine -Message "BitLocker enable plan" -ForegroundColor Cyan -UseColor $UseColor
+    Write-Rule -Width $width -UseColor $UseColor
+
+    if (-not $Plan -or $Plan.Count -eq 0) {
+        Write-ConsoleLine -Message "No drives were found for BitLocker enablement." -ForegroundColor Yellow -UseColor $UseColor
+        return
+    }
+
+    $index = 1
+    foreach ($item in $Plan) {
+        $color = if ($item.CanApply) { "Yellow" } elseif ($item.RiskLevel -eq "High") { "Red" } else { "Gray" }
+        $applyText = if ($item.CanApply) { "eligible with -Apply" } else { "not applied automatically" }
+        Write-ConsoleLine -Message ("{0,2}. [{1} / {2} / {3}] {4}" -f $index, $item.ActionType, $item.ReasonType, $item.RiskLevel, $item.Title) -ForegroundColor $color -UseColor $UseColor
+        Write-ConsoleLine -Message ("    reason  {0}" -f $item.Reason) -ForegroundColor Gray -UseColor $UseColor
+        Write-ConsoleLine -Message ("    apply   {0}" -f $applyText) -ForegroundColor Gray -UseColor $UseColor
+        if ($item.Command) {
+            Write-ConsoleLine -Message ("    command {0}" -f $item.Command) -ForegroundColor DarkYellow -UseColor $UseColor
+        }
+        if ($item.Notes) {
+            Write-ConsoleLine -Message ("    notes   {0}" -f $item.Notes) -ForegroundColor DarkGray -UseColor $UseColor
+        }
+        $index++
+    }
+}
+
+function Invoke-BitLockerEnable {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param(
+        [object[]]$Plan,
+        [switch]$Apply,
+        [switch]$Quiet,
+        [bool]$UseColor = $true
+    )
+
+    $items = @($Plan | Where-Object { $_.CanApply -and $_.DriveLetter })
+    if (-not $items -or $items.Count -eq 0) {
+        if (-not $Quiet) {
+            Write-ConsoleLine -Message "No eligible unencrypted fixed drives were found for BitLocker enablement." -ForegroundColor Yellow -UseColor $UseColor
+            Write-BitLockerEnablePlan -Plan $Plan -UseColor $UseColor
+        }
+        return
+    }
+
+    if (-not $Apply -and -not $WhatIfPreference) {
+        if (-not $Quiet) {
+            Write-ConsoleLine -Message "No changes were made. Re-run with -EnableBitLocker -WhatIf to preview or -EnableBitLocker -Apply to start encryption." -ForegroundColor Yellow -UseColor $UseColor
+            Write-BitLockerEnablePlan -Plan $Plan -UseColor $UseColor
+        }
+        return
+    }
+
+    foreach ($item in $items) {
+        $target = "$($item.DriveLetter):"
+        if (-not $PSCmdlet.ShouldProcess($target, $item.Command)) {
+            continue
+        }
+
+        if (-not $Apply) {
+            continue
+        }
+
+        try {
+            if ($item.IsSystemDrive) {
+                Enable-BitLocker -MountPoint $target -EncryptionMethod XtsAes256 -UsedSpaceOnly -TpmProtector -ErrorAction Stop | Out-Null
+                $updatedVolume = Get-BitLockerVolume -MountPoint $target -ErrorAction Stop
+                $hasRecoveryPassword = $updatedVolume.KeyProtector | Where-Object { $_.KeyProtectorType -eq "RecoveryPassword" }
+                if (-not $hasRecoveryPassword) {
+                    Add-BitLockerKeyProtector -MountPoint $target -RecoveryPasswordProtector -ErrorAction Stop | Out-Null
+                }
+            } else {
+                Enable-BitLocker -MountPoint $target -EncryptionMethod XtsAes256 -UsedSpaceOnly -RecoveryPasswordProtector -ErrorAction Stop | Out-Null
+                if ($item.EnableAutoUnlock) {
+                    try {
+                        Enable-BitLockerAutoUnlock -MountPoint $target -ErrorAction Stop | Out-Null
+                    } catch {
+                        Write-ConsoleLine -Message "Warning: BitLocker started on $target, but auto-unlock could not be enabled: $($_.Exception.Message)" -ForegroundColor Yellow -UseColor $UseColor
+                    }
+                }
+            }
+
+            if (-not $Quiet) {
+                Write-ConsoleLine -Message "Started BitLocker: $($item.Title)" -ForegroundColor Green -UseColor $UseColor
+            }
+        } catch {
+            Write-ConsoleLine -Message "Failed: $($item.Title) - $($_.Exception.Message)" -ForegroundColor Red -UseColor $UseColor
+        }
+    }
 }
 
 function Write-RemediationPlan {
@@ -380,8 +874,10 @@ function Write-RemediationPlan {
             default              { "Gray" }
         }
 
-        Write-ConsoleLine -Message ("{0,2}. [{1}] {2}" -f $index, $item.ActionType, $item.Title) -ForegroundColor $color -UseColor $UseColor
+        $applyText = if ($item.CanApply) { "safe automatic candidate" } else { "manual/review only" }
+        Write-ConsoleLine -Message ("{0,2}. [{1} / {2} / {3}] {4}" -f $index, $item.ActionType, $item.ReasonType, $item.RiskLevel, $item.Title) -ForegroundColor $color -UseColor $UseColor
         Write-ConsoleLine -Message ("    reason  {0}" -f $item.Reason) -ForegroundColor Gray -UseColor $UseColor
+        Write-ConsoleLine -Message ("    apply   {0}" -f $applyText) -ForegroundColor Gray -UseColor $UseColor
         if ($item.Command) {
             Write-ConsoleLine -Message ("    command {0}" -f $item.Command) -ForegroundColor DarkYellow -UseColor $UseColor
         }
@@ -400,7 +896,7 @@ function Invoke-SafeRemediation {
         [bool]$UseColor = $true
     )
 
-    $automaticItems = @($Plan | Where-Object { $_.ActionType -eq "AutomaticCandidate" -and $_.Operation -and $_.DriveLetter })
+    $automaticItems = @($Plan | Where-Object { $_.CanApply -and $_.Operation -and $_.DriveLetter })
     if (-not $automaticItems -or $automaticItems.Count -eq 0) {
         Write-ConsoleLine -Message "No safe automatic remediation candidates were found." -ForegroundColor Yellow -UseColor $UseColor
         return
@@ -531,6 +1027,9 @@ function Show-Usage {
     Write-ConsoleLine -Message "  bitdiag -PlanFixes" -UseColor $UseColor
     Write-ConsoleLine -Message "  bitdiag -Fix -WhatIf" -UseColor $UseColor
     Write-ConsoleLine -Message "  bitdiag -Fix -Apply" -UseColor $UseColor
+    Write-ConsoleLine -Message "  bitdiag -EnableBitLocker" -UseColor $UseColor
+    Write-ConsoleLine -Message "  bitdiag -EnableBitLocker -Apply" -UseColor $UseColor
+    Write-ConsoleLine -Message "  bitdiag -EnterpriseReport -OutDirectory \\server\share\BitDiag" -UseColor $UseColor
     Write-ConsoleLine -Message "  bitdiag -Version" -UseColor $UseColor
     Write-ConsoleLine -Message "" -UseColor $UseColor
     Write-ConsoleLine -Message "Note: Do not type square brackets from documentation syntax; they only mean optional." -ForegroundColor Gray -UseColor $UseColor
@@ -552,8 +1051,11 @@ function Show-Usage {
     Write-ConsoleLine -Message "  -Interactive              Open the interactive menu" -UseColor $UseColor
     Write-ConsoleLine -Message "  -PlanFixes                Generate a remediation plan without changing the system" -UseColor $UseColor
     Write-ConsoleLine -Message "  -Fix                      Prepare safe automatic remediation candidates" -UseColor $UseColor
-    Write-ConsoleLine -Message "  -Apply                    Execute safe automatic remediation candidates with -Fix" -UseColor $UseColor
-    Write-ConsoleLine -Message "  -WhatIf                   Preview -Fix actions without changing the system" -UseColor $UseColor
+    Write-ConsoleLine -Message "  -Apply                    Execute -Fix candidates or start eligible -EnableBitLocker actions" -UseColor $UseColor
+    Write-ConsoleLine -Message "  -EnableBitLocker          Prepare BitLocker enablement for eligible unencrypted fixed drives" -UseColor $UseColor
+    Write-ConsoleLine -Message "  -WhatIf                   Preview -Fix or -EnableBitLocker actions without changing the system" -UseColor $UseColor
+    Write-ConsoleLine -Message "  -EnterpriseReport         Write flat NDJSON for SCCM-triggered Power BI reporting" -UseColor $UseColor
+    Write-ConsoleLine -Message "  -OutDirectory             Directory or share path for enterprise NDJSON output" -UseColor $UseColor
     Write-ConsoleLine -Message "  -Version                  Show BitDiag version" -UseColor $UseColor
     Write-ConsoleLine -Message "  -NoExitCode               Do not set process exit code" -UseColor $UseColor
     Write-ConsoleLine -Message "" -UseColor $UseColor
@@ -906,12 +1408,19 @@ function Test-ActiveMbrPartition {
 
         foreach ($partition in $activePartitions) {
             $drive = if ($partition.DriveLetter) { "$($partition.DriveLetter):" } else { "no drive letter" }
+            $checkName = if ($partition.DriveLetter) { "$($partition.DriveLetter): active MBR partition" } else { "Active MBR partition" }
             New-CheckResult `
                 -Category "Disk" `
-                -CheckName "Active MBR partition" `
+                -CheckName $checkName `
                 -Status "Warning" `
                 -Message "Disk $($partition.DiskNumber), partition $($partition.PartitionNumber) is active ($drive)." `
-                -Fix "If switching to UEFI/GPT, validate the boot layout before changing active partition state."
+                -Fix "If this is a secondary MBR data disk, make the partition inactive only after validating boot layout and backups." `
+                -Details @{
+                    DiskNumber      = $partition.DiskNumber
+                    PartitionNumber = $partition.PartitionNumber
+                    DriveLetter     = $partition.DriveLetter
+                    IsActive        = $partition.IsActive
+                }
         }
     } catch {
         New-CheckResult -Category "Disk" -CheckName "Active MBR partition" -Status "Error" -Message "Active partition check failed: $($_.Exception.Message)"
@@ -1077,6 +1586,100 @@ function Test-KeyProtectors {
         -Details $KeyProtectors
 }
 
+function Normalize-BitLockerProtectorId {
+    param([object]$Value)
+
+    if ($null -eq $Value) {
+        return ""
+    }
+
+    ([string]$Value).Trim().Trim("{", "}").ToUpperInvariant()
+}
+
+function ConvertTo-LdapFilterValue {
+    param([string]$Value)
+
+    if ($null -eq $Value) {
+        return ""
+    }
+
+    $Value.Replace("\", "\5c").Replace("*", "\2a").Replace("(", "\28").Replace(")", "\29").Replace([string][char]0, "\00")
+}
+
+function Get-AdDsRecoveryEscrowState {
+    if ($script:BitDiagAdDsRecoveryEscrowState) {
+        return $script:BitDiagAdDsRecoveryEscrowState
+    }
+
+    $state = [PSCustomObject]@{
+        Available    = $false
+        ProtectorIds = @()
+        Message      = "AD DS recovery escrow could not be checked."
+    }
+
+    try {
+        Add-Type -AssemblyName System.DirectoryServices -ErrorAction Stop | Out-Null
+
+        $rootDse = [ADSI]"LDAP://RootDSE"
+        $defaultNamingContext = [string]$rootDse.defaultNamingContext
+        if ([string]::IsNullOrWhiteSpace($defaultNamingContext)) {
+            $state.Message = "This machine does not appear to be joined to an AD DS domain."
+            $script:BitDiagAdDsRecoveryEscrowState = $state
+            return $state
+        }
+
+        $directoryRoot = New-Object System.DirectoryServices.DirectoryEntry("LDAP://$defaultNamingContext")
+        $computerSearcher = New-Object System.DirectoryServices.DirectorySearcher($directoryRoot)
+        $computerSearcher.Filter = "(&(objectCategory=computer)(sAMAccountName=$(ConvertTo-LdapFilterValue -Value ("{0}$" -f $env:COMPUTERNAME))))"
+        $computerSearcher.SearchScope = [System.DirectoryServices.SearchScope]::Subtree
+        [void]$computerSearcher.PropertiesToLoad.Add("distinguishedName")
+        $computerResult = $computerSearcher.FindOne()
+        if (-not $computerResult -or -not $computerResult.Properties["distinguishedname"]) {
+            $state.Message = "The local computer object was not found in AD DS."
+            $script:BitDiagAdDsRecoveryEscrowState = $state
+            return $state
+        }
+
+        $computerDn = [string]$computerResult.Properties["distinguishedname"][0]
+        $computerEntry = New-Object System.DirectoryServices.DirectoryEntry("LDAP://$computerDn")
+        $recoverySearcher = New-Object System.DirectoryServices.DirectorySearcher($computerEntry)
+        $recoverySearcher.Filter = "(objectClass=msFVE-RecoveryInformation)"
+        $recoverySearcher.SearchScope = [System.DirectoryServices.SearchScope]::Subtree
+        [void]$recoverySearcher.PropertiesToLoad.Add("msFVE-RecoveryGuid")
+        [void]$recoverySearcher.PropertiesToLoad.Add("name")
+
+        $ids = @()
+        foreach ($recoveryResult in $recoverySearcher.FindAll()) {
+            foreach ($guidValue in $recoveryResult.Properties["msfve-recoveryguid"]) {
+                try {
+                    if ($guidValue -is [byte[]]) {
+                        $ids += (Normalize-BitLockerProtectorId -Value ([guid]::new($guidValue)).ToString())
+                    } else {
+                        $ids += (Normalize-BitLockerProtectorId -Value $guidValue)
+                    }
+                } catch {
+                    # Ignore malformed AD values; another recovery object may still be usable.
+                }
+            }
+        }
+
+        $state = [PSCustomObject]@{
+            Available    = $true
+            ProtectorIds = @($ids | Where-Object { $_ } | Select-Object -Unique)
+            Message      = if ($ids.Count -gt 0) { "AD DS recovery objects were visible for this computer." } else { "No AD DS recovery objects were visible for this computer." }
+        }
+    } catch {
+        $state = [PSCustomObject]@{
+            Available    = $false
+            ProtectorIds = @()
+            Message      = "AD DS recovery escrow check failed or was not permitted: $($_.Exception.Message)"
+        }
+    }
+
+    $script:BitDiagAdDsRecoveryEscrowState = $state
+    $state
+}
+
 function Test-RecoveryBackupVisibility {
     param(
         [string]$DriveLetter,
@@ -1087,12 +1690,53 @@ function Test-RecoveryBackupVisibility {
         return
     }
 
+    $localProtectorIds = @(
+        $RecoveryProtectors |
+            ForEach-Object { Normalize-BitLockerProtectorId -Value $_.KeyProtectorId } |
+            Where-Object { $_ } |
+            Select-Object -Unique
+    )
+
+    $adEscrow = Get-AdDsRecoveryEscrowState
+    if ($adEscrow.Available -and $adEscrow.ProtectorIds.Count -gt 0) {
+        $matchedIds = @($localProtectorIds | Where-Object { $_ -in $adEscrow.ProtectorIds })
+        if ($matchedIds.Count -gt 0) {
+            return New-CheckResult `
+                -Category "BitLocker" `
+                -CheckName "${DriveLetter}: recovery backup" `
+                -Status "OK" `
+                -Message "${DriveLetter}: recovery password protector appears backed up to AD DS." `
+                -Details @{
+                    LocalRecoveryProtectorIds = $localProtectorIds
+                    MatchedAdDsProtectorIds   = $matchedIds
+                    Source                    = "AD DS"
+                }
+        }
+
+        return New-CheckResult `
+            -Category "BitLocker" `
+            -CheckName "${DriveLetter}: recovery backup" `
+            -Status "Info" `
+            -Message "${DriveLetter}: recovery password exists, but no matching AD DS recovery object was visible to this session." `
+            -Fix "Confirm the recovery key is backed up to your organization-approved location before changing protectors." `
+            -Details @{
+                LocalRecoveryProtectorIds = $localProtectorIds
+                VisibleAdDsProtectorIds   = $adEscrow.ProtectorIds
+                Source                    = "AD DS"
+            }
+    }
+
     New-CheckResult `
         -Category "BitLocker" `
         -CheckName "${DriveLetter}: recovery backup" `
         -Status "Info" `
-        -Message "${DriveLetter}: recovery password exists, but local diagnostics cannot verify AD DS or Entra ID backup status." `
-        -Fix "Confirm the recovery key is backed up to your organization-approved location before changing protectors."
+        -Message "${DriveLetter}: recovery password exists, but local diagnostics could not verify AD DS or Entra ID backup status. $($adEscrow.Message)" `
+        -Fix "Confirm the recovery key is backed up to your organization-approved location before changing protectors." `
+        -Details @{
+            LocalRecoveryProtectorIds = $localProtectorIds
+            Source                    = "Local/Unknown"
+            Message                   = $adEscrow.Message
+        }
 }
 
 function Test-SuspendedProtection {
@@ -1330,6 +1974,10 @@ function Get-BitLockerPolicyInterpretation {
         FDVRequireActiveDirectoryBackup = "Controls whether fixed data drive recovery information must be backed up before BitLocker is enabled."
         RDVRecovery                 = "Controls removable data drive recovery options."
         RDVRequireActiveDirectoryBackup = "Controls whether removable data drive recovery information must be backed up before BitLocker is enabled."
+        FDVDenyWriteAccess          = "Denies write access to fixed data drives that are not protected by BitLocker."
+        RDVDenyWriteAccess          = "Denies write access to removable data drives that are not protected by BitLocker."
+        FDVActiveDirectoryBackup    = "Controls fixed data drive recovery backup to Active Directory Domain Services."
+        RDVActiveDirectoryBackup    = "Controls removable data drive recovery backup to Active Directory Domain Services."
         EncryptionMethod            = "Controls legacy encryption method policy."
         EncryptionMethodWithXtsOs   = "Controls OS drive encryption method policy."
         EncryptionMethodWithXtsFdv  = "Controls fixed data drive encryption method policy."
@@ -1361,6 +2009,89 @@ function Get-BitLockerPolicyInterpretation {
     }
 
     $interpretations
+}
+
+function Get-BitLockerPolicySpecificFindings {
+    param([object[]]$ConfiguredPolicies)
+
+    $flatValues = @()
+    foreach ($policy in $ConfiguredPolicies) {
+        foreach ($value in $policy.Values) {
+            $parts = $value -split "=", 2
+            if ($parts.Count -ne 2) {
+                continue
+            }
+
+            $flatValues += [PSCustomObject]@{
+                Path  = $policy.Path
+                Name  = $parts[0]
+                Value = $parts[1]
+            }
+        }
+    }
+
+    $results = @()
+    foreach ($policyValue in $flatValues) {
+        switch ($policyValue.Name) {
+            "FDVDenyWriteAccess" {
+                if ([string]$policyValue.Value -eq "1") {
+                    $results += New-CheckResult `
+                        -Category "Policy" `
+                        -CheckName "Fixed data drive write policy" `
+                        -Status "Warning" `
+                        -Message "Policy denies write access to fixed data drives that are not protected by BitLocker." `
+                        -Fix "Enable BitLocker on the fixed data drive, or review the FDVDenyWriteAccess policy in Group Policy/MDM." `
+                        -Details $policyValue
+                }
+            }
+            "RDVDenyWriteAccess" {
+                if ([string]$policyValue.Value -eq "1") {
+                    $results += New-CheckResult `
+                        -Category "Policy" `
+                        -CheckName "Removable drive write policy" `
+                        -Status "Warning" `
+                        -Message "Policy denies write access to removable drives that are not protected by BitLocker." `
+                        -Fix "Enable BitLocker To Go where appropriate, or review the RDVDenyWriteAccess policy in Group Policy/MDM." `
+                        -Details $policyValue
+                }
+            }
+            "OSRequireActiveDirectoryBackup" {
+                if ([string]$policyValue.Value -eq "1") {
+                    $results += New-CheckResult `
+                        -Category "Policy" `
+                        -CheckName "OS recovery escrow policy" `
+                        -Status "Info" `
+                        -Message "Policy requires OS drive recovery information to be backed up before BitLocker is enabled." `
+                        -Fix "Confirm AD DS recovery escrow succeeds before relying on OS drive protection changes." `
+                        -Details $policyValue
+                }
+            }
+            "FDVRequireActiveDirectoryBackup" {
+                if ([string]$policyValue.Value -eq "1") {
+                    $results += New-CheckResult `
+                        -Category "Policy" `
+                        -CheckName "Fixed data recovery escrow policy" `
+                        -Status "Info" `
+                        -Message "Policy requires fixed data drive recovery information to be backed up before BitLocker is enabled." `
+                        -Fix "Confirm AD DS recovery escrow succeeds before relying on fixed data drive protection changes." `
+                        -Details $policyValue
+                }
+            }
+            "RDVRequireActiveDirectoryBackup" {
+                if ([string]$policyValue.Value -eq "1") {
+                    $results += New-CheckResult `
+                        -Category "Policy" `
+                        -CheckName "Removable recovery escrow policy" `
+                        -Status "Info" `
+                        -Message "Policy requires removable drive recovery information to be backed up before BitLocker is enabled." `
+                        -Fix "Confirm AD DS recovery escrow succeeds before relying on removable drive protection changes." `
+                        -Details $policyValue
+                }
+            }
+        }
+    }
+
+    $results
 }
 
 function Test-BitLockerPolicy {
@@ -1417,6 +2148,8 @@ function Test-BitLockerPolicy {
                 -Message "No known BitLocker policy values were recognized for interpretation." `
                 -Details $configuredPolicies
         }
+
+        $results += Get-BitLockerPolicySpecificFindings -ConfiguredPolicies $configuredPolicies
 
         $results
     } catch {
@@ -1737,6 +2470,156 @@ function Export-JsonReport {
     $Results | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $Path -Encoding UTF8
 }
 
+function Get-ResultDriveLetter {
+    param([object]$Result)
+
+    if ($Result.CheckName -match "^([A-Z]):") {
+        return $Matches[1]
+    }
+
+    ""
+}
+
+function Get-EnterpriseClassification {
+    param(
+        [object]$Result
+    )
+
+    if ($Result.Status -notin @("Warning", "Alert", "Error")) {
+        return [PSCustomObject]@{ ReasonType = ""; RiskLevel = ""; CanApply = $false }
+    }
+
+    if ($Result.CheckName -match "^([A-Z]): recovery password" -and $Result.Message -match "missing|not detected") {
+        return [PSCustomObject]@{ ReasonType = "MissingProtector"; RiskLevel = "Low"; CanApply = $true }
+    }
+
+    if ($Result.CheckName -match "^([A-Z]): protection" -and $Result.Status -in @("Warning", "Error")) {
+        return [PSCustomObject]@{ ReasonType = "ProtectionOff"; RiskLevel = "Low"; CanApply = $true }
+    }
+
+    if ($Result.CheckName -match "^([A-Z]): suspension" -and $Result.Status -eq "Warning") {
+        return [PSCustomObject]@{ ReasonType = "ProtectionOff"; RiskLevel = "Low"; CanApply = $true }
+    }
+
+    if ($Result.CheckName -match "^([A-Z]): auto-unlock" -and $Result.Status -eq "Warning") {
+        return [PSCustomObject]@{ ReasonType = "AutoUnlockOff"; RiskLevel = "Low"; CanApply = $true }
+    }
+
+    if ($Result.CheckName -match "^([A-Z]): encryption" -and $Result.Message -match "not encrypted|method is None") {
+        return [PSCustomObject]@{ ReasonType = "EncryptionOff"; RiskLevel = "Medium"; CanApply = $false }
+    }
+
+    if ($Result.CheckName -eq "Secure Boot") {
+        return [PSCustomObject]@{ ReasonType = "Platform"; RiskLevel = "High"; CanApply = $false }
+    }
+
+    if ($Result.CheckName -match "partition style|TPM \+ boot mode|Boot mode|EFI System Partition|^ESP on|active MBR partition") {
+        return [PSCustomObject]@{ ReasonType = "DiskLayout"; RiskLevel = "High"; CanApply = $false }
+    }
+
+    if ($Result.CheckName -match "BitLocker policy|write policy|escrow policy") {
+        return [PSCustomObject]@{ ReasonType = "Policy"; RiskLevel = "Medium"; CanApply = $false }
+    }
+
+    if ($Result.Category -eq "Runtime") {
+        return [PSCustomObject]@{ ReasonType = "Runtime"; RiskLevel = "Medium"; CanApply = $false }
+    }
+
+    [PSCustomObject]@{
+        ReasonType = "Other"
+        RiskLevel  = "Medium"
+        CanApply   = $false
+    }
+}
+
+function ConvertTo-EnterpriseRecord {
+    param(
+        [object]$Result,
+        [object]$Identity,
+        [string]$RunId,
+        [string]$TimestampUtc,
+        [string]$Version,
+        [int]$ExitCode
+    )
+
+    $classification = Get-EnterpriseClassification -Result $Result
+
+    [PSCustomObject]@{
+        RunId          = $RunId
+        TimestampUtc   = $TimestampUtc
+        ComputerName   = Format-EnterpriseText -Value $Identity.ComputerName -MaxLength 128
+        Domain         = Format-EnterpriseText -Value $Identity.Domain -MaxLength 256
+        DeviceGuid     = Format-EnterpriseText -Value $Identity.DeviceGuid -MaxLength 64
+        UserContext    = Format-EnterpriseText -Value $Identity.UserContext -MaxLength 256
+        BitDiagVersion = $Version
+        DriveLetter    = Get-ResultDriveLetter -Result $Result
+        Category       = Format-EnterpriseText -Value $Result.Category -MaxLength 64
+        CheckName      = Format-EnterpriseText -Value $Result.CheckName -MaxLength 160
+        Status         = Format-EnterpriseText -Value $Result.Status -MaxLength 32
+        Message        = Format-EnterpriseText -Value $Result.Message -MaxLength 500
+        Fix            = Format-EnterpriseText -Value $Result.Fix -MaxLength 500
+        ReasonType     = Format-EnterpriseText -Value $classification.ReasonType -MaxLength 64
+        RiskLevel      = Format-EnterpriseText -Value $classification.RiskLevel -MaxLength 32
+        CanApply       = [bool]$classification.CanApply
+        ExitCode       = $ExitCode
+    }
+}
+
+function Export-EnterpriseReport {
+    param(
+        [object[]]$Results,
+        [string]$OutDirectory,
+        [int]$ExitCode
+    )
+
+    if ([string]::IsNullOrWhiteSpace($OutDirectory)) {
+        throw "OutDirectory is required when -EnterpriseReport is used."
+    }
+
+    $identity = Get-EnterpriseIdentity
+    $runId = [guid]::NewGuid().ToString()
+    $timestamp = Get-Date
+    $timestampUtc = $timestamp.ToUniversalTime().ToString("o")
+    $version = Get-BitDiagVersion
+
+    $records = @(
+        $Results | ForEach-Object {
+            ConvertTo-EnterpriseRecord `
+                -Result $_ `
+                -Identity $identity `
+                -RunId $runId `
+                -TimestampUtc $timestampUtc `
+                -Version $version `
+                -ExitCode $ExitCode
+        }
+    )
+
+    if (-not (Test-Path $OutDirectory)) {
+        New-Item -ItemType Directory -Path $OutDirectory -Force | Out-Null
+    }
+
+    $safeComputer = Get-SafeFileNamePart -Value $identity.ComputerName
+    $safeGuid = Get-SafeFileNamePart -Value $identity.DeviceGuid
+    $stamp = $timestamp.ToString("yyyyMMdd-HHmmss")
+    $fileName = "{0}_{1}_{2}.ndjson" -f $safeComputer, $safeGuid, $stamp
+    $finalPath = Join-Path -Path $OutDirectory -ChildPath $fileName
+    $remoteTempPath = "$finalPath.tmp"
+    $localTempPath = Join-Path -Path ([System.IO.Path]::GetTempPath()) ("bitdiag-{0}.ndjson" -f $runId)
+
+    try {
+        $lines = @($records | ForEach-Object { $_ | ConvertTo-Json -Depth 6 -Compress })
+        Set-Content -LiteralPath $localTempPath -Value $lines -Encoding UTF8
+        Copy-Item -LiteralPath $localTempPath -Destination $remoteTempPath -Force
+        Move-Item -LiteralPath $remoteTempPath -Destination $finalPath -Force
+    } finally {
+        if (Test-Path $localTempPath) {
+            Remove-Item -LiteralPath $localTempPath -Force
+        }
+    }
+
+    $finalPath
+}
+
 function Export-HtmlReport {
     param(
         [object[]]$Results,
@@ -1829,8 +2712,9 @@ function Invoke-BitDiagInteractive {
         Write-ConsoleLine -Message "  5. Export JSON report" -UseColor $useColor
         Write-ConsoleLine -Message "  6. Generate remediation plan" -UseColor $useColor
         Write-ConsoleLine -Message "  7. Preview safe fixes" -UseColor $useColor
-        Write-ConsoleLine -Message "  8. Show help" -UseColor $useColor
-        Write-ConsoleLine -Message "  9. Exit" -UseColor $useColor
+        Write-ConsoleLine -Message "  8. Enable BitLocker on unprotected drives" -UseColor $useColor
+        Write-ConsoleLine -Message "  9. Show help" -UseColor $useColor
+        Write-ConsoleLine -Message "  10. Exit" -UseColor $useColor
         Write-ConsoleLine -Message "" -UseColor $useColor
 
         $choice = Read-Host "Choose an option"
@@ -1868,8 +2752,17 @@ function Invoke-BitDiagInteractive {
             }
             "6" { bitdiag -Run -PlanFixes -NoExitCode -Color $Color; return }
             "7" { bitdiag -Run -Fix -WhatIf -NoExitCode -Color $Color; return }
-            "8" { bitdiag -Help -NoExitCode -Color $Color; return }
-            "9" { return }
+            "8" {
+                bitdiag -Run -EnableBitLocker -NoExitCode -Color $Color
+                Write-ConsoleLine -Message "" -UseColor $useColor
+                $confirm = Read-Host "Type APPLY to start BitLocker on eligible drives"
+                if ($confirm -eq "APPLY") {
+                    bitdiag -Run -EnableBitLocker -Apply -NoExitCode -Color $Color
+                }
+                return
+            }
+            "9" { bitdiag -Help -NoExitCode -Color $Color; return }
+            "10" { return }
             default { Write-ConsoleLine -Message "Invalid choice." -ForegroundColor Yellow -UseColor $useColor }
         }
     }
@@ -1921,7 +2814,13 @@ function bitdiag {
 
         [switch]$Fix,
 
+        [switch]$EnableBitLocker,
+
         [switch]$Apply,
+
+        [switch]$EnterpriseReport,
+
+        [string]$OutDirectory,
 
         [switch]$Version,
 
@@ -2013,7 +2912,18 @@ function bitdiag {
 
     $reportResults = Select-DiagnosticResults -Results $results -Category $Category -Status $Status -ProblemsOnly:$ProblemsOnly
 
-    if ($Fix) {
+    if ($EnterpriseReport -and $EnableBitLocker) {
+        Write-ConsoleLine -Message "Enterprise reporting and BitLocker enablement should be run as separate commands." -ForegroundColor Yellow -UseColor $useColor
+    } elseif ($EnterpriseReport) {
+        $enterpriseExitCode = Get-DiagnosticsExitCode -Results $results
+        $enterprisePath = Export-EnterpriseReport -Results $results -OutDirectory $OutDirectory -ExitCode $enterpriseExitCode
+        if (-not $Quiet) {
+            Write-ConsoleLine -Message "Enterprise NDJSON report written to $enterprisePath" -ForegroundColor Cyan -UseColor $useColor
+        }
+    } elseif ($EnableBitLocker) {
+        $enablePlan = @(Get-BitLockerEnablePlan -DriveLetters $normalizedDriveLetters -Results $results -BootMode $bootMode -TpmState $tpmState)
+        Invoke-BitLockerEnable -Plan $enablePlan -Apply:$Apply -Quiet:$Quiet -UseColor $useColor
+    } elseif ($Fix) {
         $fixPlan = @(Get-RemediationPlan -Results $reportResults)
         Invoke-SafeRemediation -Plan $fixPlan -Apply:$Apply -UseColor $useColor
     } elseif ($PlanFixes) {

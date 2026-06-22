@@ -4,5 +4,5 @@
 #>
 
 $modulePath = Join-Path -Path $PSScriptRoot -ChildPath "BitDiag\BitDiag.psm1"
-Import-Module $modulePath -Force
+Import-Module $modulePath -Force -DisableNameChecking
 bitdiag -ExitProcess @args
