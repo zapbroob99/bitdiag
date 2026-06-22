@@ -212,6 +212,172 @@ function Write-RecommendedActions {
     }
 }
 
+function Get-BitDiagVersion {
+    $manifestPath = Join-Path -Path $PSScriptRoot -ChildPath "BitDiag.psd1"
+    try {
+        $manifest = Test-ModuleManifest -Path $manifestPath -ErrorAction Stop
+        return [string]$manifest.Version
+    } catch {
+        return "unknown"
+    }
+}
+
+function New-FixPlanItem {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Title,
+
+        [Parameter(Mandatory)]
+        [ValidateSet("AutomaticCandidate", "Manual", "Review")]
+        [string]$ActionType,
+
+        [Parameter(Mandatory)]
+        [string]$Reason,
+
+        [string]$Command,
+
+        [string]$Notes
+    )
+
+    [PSCustomObject]@{
+        Title      = $Title
+        ActionType = $ActionType
+        Reason     = $Reason
+        Command    = $Command
+        Notes      = $Notes
+    }
+}
+
+function Get-RemediationPlan {
+    param([object[]]$Results)
+
+    $plan = @()
+    foreach ($result in $Results) {
+        if ($result.Status -notin @("Warning", "Alert", "Error")) {
+            continue
+        }
+
+        if ($result.CheckName -match "^([A-Z]): recovery password" -and $result.Message -match "missing|not detected") {
+            $drive = $Matches[1]
+            $plan += New-FixPlanItem `
+                -Title "${drive}: add recovery password protector" `
+                -ActionType "AutomaticCandidate" `
+                -Reason $result.Message `
+                -Command "Add-BitLockerKeyProtector -MountPoint ${drive}: -RecoveryPasswordProtector" `
+                -Notes "Confirm recovery key escrow requirements before or immediately after adding the protector."
+            continue
+        }
+
+        if ($result.CheckName -match "^([A-Z]): protection" -and $result.Status -in @("Warning", "Error")) {
+            $drive = $Matches[1]
+            $plan += New-FixPlanItem `
+                -Title "${drive}: resume or enable BitLocker protection" `
+                -ActionType "AutomaticCandidate" `
+                -Reason $result.Message `
+                -Command "Resume-BitLocker -MountPoint ${drive}:" `
+                -Notes "Only run after confirming recovery keys are backed up."
+            continue
+        }
+
+        if ($result.CheckName -match "^([A-Z]): suspension" -and $result.Status -eq "Warning") {
+            $drive = $Matches[1]
+            $plan += New-FixPlanItem `
+                -Title "${drive}: clear suspended protection state" `
+                -ActionType "AutomaticCandidate" `
+                -Reason $result.Message `
+                -Command "Resume-BitLocker -MountPoint ${drive}:" `
+                -Notes "This is safe only when recovery keys are available."
+            continue
+        }
+
+        if ($result.CheckName -match "^([A-Z]): auto-unlock" -and $result.Status -eq "Warning") {
+            $drive = $Matches[1]
+            $plan += New-FixPlanItem `
+                -Title "${drive}: enable auto-unlock" `
+                -ActionType "AutomaticCandidate" `
+                -Reason $result.Message `
+                -Command "Enable-BitLockerAutoUnlock -MountPoint ${drive}:" `
+                -Notes "Use for data drives only, after the OS drive is protected."
+            continue
+        }
+
+        if ($result.CheckName -eq "Secure Boot" -and $result.Status -in @("Warning", "Error")) {
+            $plan += New-FixPlanItem `
+                -Title "Review Secure Boot configuration" `
+                -ActionType "Manual" `
+                -Reason $result.Message `
+                -Notes "Secure Boot must be changed in firmware/UEFI settings; do not automate this from BitDiag."
+            continue
+        }
+
+        if ($result.CheckName -match "partition style|TPM \\+ boot mode|Boot mode" -and $result.Status -in @("Warning", "Alert", "Error")) {
+            $plan += New-FixPlanItem `
+                -Title "Review boot and disk layout before changing firmware or partitioning" `
+                -ActionType "Manual" `
+                -Reason $result.Message `
+                -Notes "MBR/GPT conversion, firmware mode changes, and boot partition changes require a separate backup and migration plan."
+            continue
+        }
+
+        if ($result.CheckName -match "BitLocker policy") {
+            $plan += New-FixPlanItem `
+                -Title "Review BitLocker policy" `
+                -ActionType "Review" `
+                -Reason $result.Message `
+                -Notes "Policy is usually managed by Group Policy or MDM; review the source of authority before editing registry values."
+            continue
+        }
+
+        if ($result.Fix) {
+            $plan += New-FixPlanItem `
+                -Title $result.CheckName `
+                -ActionType "Review" `
+                -Reason $result.Message `
+                -Command $result.Fix `
+                -Notes "Review this recommendation before applying it."
+        }
+    }
+
+    $plan | Sort-Object Title, ActionType -Unique
+}
+
+function Write-RemediationPlan {
+    param(
+        [object[]]$Plan,
+        [bool]$UseColor = $true
+    )
+
+    $width = Get-ConsoleWidth
+    Write-ConsoleBanner -UseColor $UseColor
+    Write-ConsoleLine -Message "" -UseColor $UseColor
+    Write-ConsoleLine -Message "Remediation plan" -ForegroundColor Cyan -UseColor $UseColor
+    Write-Rule -Width $width -UseColor $UseColor
+
+    if (-not $Plan -or $Plan.Count -eq 0) {
+        Write-ConsoleLine -Message "No remediation actions were generated from the current diagnostics." -ForegroundColor Green -UseColor $UseColor
+        return
+    }
+
+    $index = 1
+    foreach ($item in $Plan) {
+        $color = switch ($item.ActionType) {
+            "AutomaticCandidate" { "Yellow" }
+            "Manual"             { "Red" }
+            default              { "Gray" }
+        }
+
+        Write-ConsoleLine -Message ("{0,2}. [{1}] {2}" -f $index, $item.ActionType, $item.Title) -ForegroundColor $color -UseColor $UseColor
+        Write-ConsoleLine -Message ("    reason  {0}" -f $item.Reason) -ForegroundColor Gray -UseColor $UseColor
+        if ($item.Command) {
+            Write-ConsoleLine -Message ("    command {0}" -f $item.Command) -ForegroundColor DarkYellow -UseColor $UseColor
+        }
+        if ($item.Notes) {
+            Write-ConsoleLine -Message ("    notes   {0}" -f $item.Notes) -ForegroundColor DarkGray -UseColor $UseColor
+        }
+        $index++
+    }
+}
+
 function ConvertTo-DriveLetter {
     param([string[]]$Letters)
 
@@ -292,6 +458,8 @@ function Show-Usage {
     Write-ConsoleLine -Message "  bitdiag -Format Json -OutFile .\report.json -ProblemsOnly" -UseColor $UseColor
     Write-ConsoleLine -Message "  bitdiag -Format Html -OutFile .\report.html -ProblemsOnly" -UseColor $UseColor
     Write-ConsoleLine -Message "  bitdiag -Category Platform,BitLocker -Status Warning,Alert,Error" -UseColor $UseColor
+    Write-ConsoleLine -Message "  bitdiag -PlanFixes" -UseColor $UseColor
+    Write-ConsoleLine -Message "  bitdiag -Version" -UseColor $UseColor
     Write-ConsoleLine -Message "" -UseColor $UseColor
     Write-ConsoleLine -Message "Note: Do not type square brackets from documentation syntax; they only mean optional." -ForegroundColor Gray -UseColor $UseColor
     Write-ConsoleLine -Message "" -UseColor $UseColor
@@ -310,6 +478,8 @@ function Show-Usage {
     Write-ConsoleLine -Message "  -Help, -h                 Show this help screen" -UseColor $UseColor
     Write-ConsoleLine -Message "  -Run                      Run diagnostics instead of opening the interactive menu" -UseColor $UseColor
     Write-ConsoleLine -Message "  -Interactive              Open the interactive menu" -UseColor $UseColor
+    Write-ConsoleLine -Message "  -PlanFixes                Generate a remediation plan without changing the system" -UseColor $UseColor
+    Write-ConsoleLine -Message "  -Version                  Show BitDiag version" -UseColor $UseColor
     Write-ConsoleLine -Message "  -NoExitCode               Do not set process exit code" -UseColor $UseColor
     Write-ConsoleLine -Message "" -UseColor $UseColor
     Write-ConsoleLine -Message "Exit codes: 0 OK, 1 Warning, 2 Alert/Error, 3 not administrator." -ForegroundColor Gray -UseColor $UseColor
@@ -1582,8 +1752,9 @@ function Invoke-BitDiagInteractive {
         Write-ConsoleLine -Message "  3. Select drives" -UseColor $useColor
         Write-ConsoleLine -Message "  4. Export HTML report" -UseColor $useColor
         Write-ConsoleLine -Message "  5. Export JSON report" -UseColor $useColor
-        Write-ConsoleLine -Message "  6. Show help" -UseColor $useColor
-        Write-ConsoleLine -Message "  7. Exit" -UseColor $useColor
+        Write-ConsoleLine -Message "  6. Generate remediation plan" -UseColor $useColor
+        Write-ConsoleLine -Message "  7. Show help" -UseColor $useColor
+        Write-ConsoleLine -Message "  8. Exit" -UseColor $useColor
         Write-ConsoleLine -Message "" -UseColor $useColor
 
         $choice = Read-Host "Choose an option"
@@ -1619,8 +1790,9 @@ function Invoke-BitDiagInteractive {
                 }
                 return
             }
-            "6" { bitdiag -Help -NoExitCode -Color $Color; return }
-            "7" { return }
+            "6" { bitdiag -Run -PlanFixes -NoExitCode -Color $Color; return }
+            "7" { bitdiag -Help -NoExitCode -Color $Color; return }
+            "8" { return }
             default { Write-ConsoleLine -Message "Invalid choice." -ForegroundColor Yellow -UseColor $useColor }
         }
     }
@@ -1668,8 +1840,23 @@ function bitdiag {
 
         [switch]$Interactive,
 
+        [switch]$PlanFixes,
+
+        [switch]$Version,
+
         [switch]$ExitProcess
     )
+
+    if ($Version) {
+        Write-Output ("bitdiag {0}" -f (Get-BitDiagVersion))
+        if (-not $NoExitCode -and $ExitProcess) {
+            exit 0
+        }
+        if (-not $NoExitCode -and -not $ExitProcess) {
+            $global:LASTEXITCODE = 0
+        }
+        return
+    }
 
     $userParameterNames = @($PSBoundParameters.Keys | Where-Object { $_ -ne "ExitProcess" })
     if ($Interactive -or (-not $Run -and $userParameterNames.Count -eq 0)) {
@@ -1745,41 +1932,50 @@ function bitdiag {
 
     $reportResults = Select-DiagnosticResults -Results $results -Category $Category -Status $Status -ProblemsOnly:$ProblemsOnly
 
-    switch ($OutputFormat) {
-        "Console" {
-            if (-not $Quiet) {
-                Write-ConsoleReport -Results $reportResults -AllResults $results -DriveLetters $normalizedDriveLetters -Detailed:$Detailed -UseColor $useColor
-            }
+    if ($PlanFixes) {
+        $fixPlan = @(Get-RemediationPlan -Results $reportResults)
+        if ($PassThru) {
+            $fixPlan
+        } elseif (-not $Quiet) {
+            Write-RemediationPlan -Plan $fixPlan -UseColor $useColor
         }
-        "Json" {
-            if (-not $OutputPath) {
-                $OutputPath = Get-DefaultReportPath -Format $OutputFormat
+    } else {
+        switch ($OutputFormat) {
+            "Console" {
+                if (-not $Quiet) {
+                    Write-ConsoleReport -Results $reportResults -AllResults $results -DriveLetters $normalizedDriveLetters -Detailed:$Detailed -UseColor $useColor
+                }
             }
+            "Json" {
+                if (-not $OutputPath) {
+                    $OutputPath = Get-DefaultReportPath -Format $OutputFormat
+                }
 
-            Export-JsonReport -Results $reportResults -Path $OutputPath
-            if (-not $Quiet) {
-                Write-ConsoleLine -Message "JSON report written to $OutputPath" -ForegroundColor Cyan -UseColor $useColor
+                Export-JsonReport -Results $reportResults -Path $OutputPath
+                if (-not $Quiet) {
+                    Write-ConsoleLine -Message "JSON report written to $OutputPath" -ForegroundColor Cyan -UseColor $useColor
+                }
             }
-        }
-        "Html" {
-            if (-not $OutputPath) {
-                $OutputPath = Get-DefaultReportPath -Format $OutputFormat
-            }
+            "Html" {
+                if (-not $OutputPath) {
+                    $OutputPath = Get-DefaultReportPath -Format $OutputFormat
+                }
 
-            Export-HtmlReport -Results $reportResults -Path $OutputPath
-            if (-not $Quiet) {
-                Write-ConsoleLine -Message "HTML report written to $OutputPath" -ForegroundColor Cyan -UseColor $useColor
+                Export-HtmlReport -Results $reportResults -Path $OutputPath
+                if (-not $Quiet) {
+                    Write-ConsoleLine -Message "HTML report written to $OutputPath" -ForegroundColor Cyan -UseColor $useColor
+                }
+            }
+            "None" {
+                if (-not $Quiet) {
+                    Write-ConsoleLine -Message ("Diagnostics completed. Results: {0}; exit code: {1}" -f $results.Count, (Get-DiagnosticsExitCode -Results $results)) -ForegroundColor Cyan -UseColor $useColor
+                }
             }
         }
-        "None" {
-            if (-not $Quiet) {
-                Write-ConsoleLine -Message ("Diagnostics completed. Results: {0}; exit code: {1}" -f $results.Count, (Get-DiagnosticsExitCode -Results $results)) -ForegroundColor Cyan -UseColor $useColor
-            }
-        }
-    }
 
-    if ($PassThru) {
-        $reportResults
+        if ($PassThru) {
+            $reportResults
+        }
     }
 
     $exitCode = Get-DiagnosticsExitCode -Results $results

@@ -31,6 +31,20 @@ Clone the repository, then run:
 .\install.ps1
 ```
 
+Or bootstrap the install directly from GitHub:
+
+```powershell
+irm https://raw.githubusercontent.com/zapbroob99/bitdiag/main/install-github.ps1 | iex
+```
+
+Manual clone/install flow:
+
+```powershell
+git clone https://github.com/zapbroob99/bitdiag.git
+cd bitdiag
+.\install.ps1
+```
+
 The installer copies the tool to:
 
 ```text
@@ -87,14 +101,21 @@ Menu options:
 3. Select drives
 4. Export HTML report
 5. Export JSON report
-6. Show help
-7. Exit
+6. Generate remediation plan
+7. Show help
+8. Exit
 ```
 
 Use `-Run` when you want diagnostics immediately without the menu:
 
 ```powershell
 bitdiag -Run
+```
+
+Show the installed version:
+
+```powershell
+bitdiag -Version
 ```
 
 ## CLI Examples
@@ -135,6 +156,12 @@ Filter by category and status:
 bitdiag -Category Platform,BitLocker -Status Warning,Alert,Error
 ```
 
+Generate a remediation plan without changing the system:
+
+```powershell
+bitdiag -PlanFixes
+```
+
 Use results in a PowerShell pipeline:
 
 ```powershell
@@ -169,6 +196,8 @@ D: Volume / BitLocker
 | --- | --- |
 | `-Run` | Run diagnostics immediately instead of opening the interactive menu. |
 | `-Interactive` | Open the interactive menu explicitly. |
+| `-Version` | Show the installed BitDiag version. |
+| `-PlanFixes` | Generate a remediation plan without changing the system. |
 | `-Drives`, `-DriveLetters` | Drive letters to inspect. If omitted, detected fixed/removable drives are checked automatically. |
 | `-AllDrives` | Discover fixed/removable volumes automatically. This is also the default when `-Drives` is omitted. |
 | `-Format`, `-OutputFormat` | Output format: `Console`, `Json`, `Html`, or `None`. |
@@ -191,6 +220,16 @@ D: Volume / BitLocker
 | `1` | Warning |
 | `2` | Alert or Error |
 | `3` | Not running as administrator |
+
+## Smoke Tests
+
+Run the basic smoke test script from the repository root:
+
+```powershell
+.\tests\smoke.ps1
+```
+
+The smoke tests validate module import, version output, help output, the backward-compatible wrapper, and remediation plan generation.
 
 ## Notes
 
