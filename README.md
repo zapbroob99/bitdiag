@@ -102,8 +102,9 @@ Menu options:
 4. Export HTML report
 5. Export JSON report
 6. Generate remediation plan
-7. Show help
-8. Exit
+7. Preview safe fixes
+8. Show help
+9. Exit
 ```
 
 Use `-Run` when you want diagnostics immediately without the menu:
@@ -162,6 +163,18 @@ Generate a remediation plan without changing the system:
 bitdiag -PlanFixes
 ```
 
+Preview safe automatic fixes without changing the system:
+
+```powershell
+bitdiag -Fix -WhatIf
+```
+
+Apply only safe automatic fixes:
+
+```powershell
+bitdiag -Fix -Apply
+```
+
 Use results in a PowerShell pipeline:
 
 ```powershell
@@ -198,6 +211,9 @@ D: Volume / BitLocker
 | `-Interactive` | Open the interactive menu explicitly. |
 | `-Version` | Show the installed BitDiag version. |
 | `-PlanFixes` | Generate a remediation plan without changing the system. |
+| `-Fix` | Prepare safe automatic remediation candidates. Does not change the system by itself. |
+| `-Apply` | Execute safe automatic remediation candidates with `-Fix`. |
+| `-WhatIf` | Preview `-Fix` actions without changing the system. |
 | `-Drives`, `-DriveLetters` | Drive letters to inspect. If omitted, detected fixed/removable drives are checked automatically. |
 | `-AllDrives` | Discover fixed/removable volumes automatically. This is also the default when `-Drives` is omitted. |
 | `-Format`, `-OutputFormat` | Output format: `Console`, `Json`, `Html`, or `None`. |
@@ -229,7 +245,17 @@ Run the basic smoke test script from the repository root:
 .\tests\smoke.ps1
 ```
 
-The smoke tests validate module import, version output, help output, the backward-compatible wrapper, and remediation plan generation.
+The smoke tests validate module import, version output, help output, the backward-compatible wrapper, remediation plan generation, and safe-fix preview.
+
+## Safe Remediation
+
+`bitdiag -Fix -Apply` is intentionally limited to low-risk actions:
+
+- Add a missing recovery password protector.
+- Resume BitLocker protection when protection appears suspended/off.
+- Enable auto-unlock for data drives.
+
+BitDiag does not automatically change firmware settings, convert MBR/GPT layouts, edit BitLocker policy registry values, or enable Secure Boot. Those items remain manual or review-only recommendations.
 
 ## Notes
 

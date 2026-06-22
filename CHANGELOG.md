@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0
+
+- Added safe remediation preview and apply flow with `-Fix`, `-WhatIf`, and `-Apply`.
+- Supports automatic candidates for adding recovery password protectors, resuming BitLocker protection, and enabling auto-unlock on data drives.
+- Keeps risky actions manual-only, including Secure Boot, firmware mode changes, MBR/GPT conversion, and BitLocker policy edits.
+- Added interactive menu option to preview safe fixes.
+
 ## 0.2.0
 
 - Added `-Version`.

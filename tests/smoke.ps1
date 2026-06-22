@@ -43,5 +43,6 @@ Assert-True -Condition ($LASTEXITCODE -eq 0 -or $null -eq $LASTEXITCODE) -Messag
 Assert-True -Condition ($LASTEXITCODE -eq 0 -or $null -eq $LASTEXITCODE) -Message "diagnose.ps1 wrapper help should not fail."
 
 & $launcherPath -Run -PlanFixes -PassThru -Quiet -NoExitCode | Out-Null
+& $launcherPath -Run -Fix -WhatIf -Quiet -NoExitCode | Out-Null
 
 Write-Host "Smoke tests passed."

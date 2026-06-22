@@ -236,7 +236,11 @@ function New-FixPlanItem {
 
         [string]$Command,
 
-        [string]$Notes
+        [string]$Notes,
+
+        [string]$Operation,
+
+        [string]$DriveLetter
     )
 
     [PSCustomObject]@{
@@ -245,6 +249,8 @@ function New-FixPlanItem {
         Reason     = $Reason
         Command    = $Command
         Notes      = $Notes
+        Operation  = $Operation
+        DriveLetter = $DriveLetter
     }
 }
 
@@ -264,7 +270,9 @@ function Get-RemediationPlan {
                 -ActionType "AutomaticCandidate" `
                 -Reason $result.Message `
                 -Command "Add-BitLockerKeyProtector -MountPoint ${drive}: -RecoveryPasswordProtector" `
-                -Notes "Confirm recovery key escrow requirements before or immediately after adding the protector."
+                -Notes "Confirm recovery key escrow requirements before or immediately after adding the protector." `
+                -Operation "AddRecoveryPassword" `
+                -DriveLetter $drive
             continue
         }
 
@@ -275,7 +283,9 @@ function Get-RemediationPlan {
                 -ActionType "AutomaticCandidate" `
                 -Reason $result.Message `
                 -Command "Resume-BitLocker -MountPoint ${drive}:" `
-                -Notes "Only run after confirming recovery keys are backed up."
+                -Notes "Only run after confirming recovery keys are backed up." `
+                -Operation "ResumeProtection" `
+                -DriveLetter $drive
             continue
         }
 
@@ -286,7 +296,9 @@ function Get-RemediationPlan {
                 -ActionType "AutomaticCandidate" `
                 -Reason $result.Message `
                 -Command "Resume-BitLocker -MountPoint ${drive}:" `
-                -Notes "This is safe only when recovery keys are available."
+                -Notes "This is safe only when recovery keys are available." `
+                -Operation "ResumeProtection" `
+                -DriveLetter $drive
             continue
         }
 
@@ -297,7 +309,9 @@ function Get-RemediationPlan {
                 -ActionType "AutomaticCandidate" `
                 -Reason $result.Message `
                 -Command "Enable-BitLockerAutoUnlock -MountPoint ${drive}:" `
-                -Notes "Use for data drives only, after the OS drive is protected."
+                -Notes "Use for data drives only, after the OS drive is protected." `
+                -Operation "EnableAutoUnlock" `
+                -DriveLetter $drive
             continue
         }
 
@@ -375,6 +389,62 @@ function Write-RemediationPlan {
             Write-ConsoleLine -Message ("    notes   {0}" -f $item.Notes) -ForegroundColor DarkGray -UseColor $UseColor
         }
         $index++
+    }
+}
+
+function Invoke-SafeRemediation {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param(
+        [object[]]$Plan,
+        [switch]$Apply,
+        [bool]$UseColor = $true
+    )
+
+    $automaticItems = @($Plan | Where-Object { $_.ActionType -eq "AutomaticCandidate" -and $_.Operation -and $_.DriveLetter })
+    if (-not $automaticItems -or $automaticItems.Count -eq 0) {
+        Write-ConsoleLine -Message "No safe automatic remediation candidates were found." -ForegroundColor Yellow -UseColor $UseColor
+        return
+    }
+
+    if (-not $Apply -and -not $WhatIfPreference) {
+        Write-ConsoleLine -Message "No changes were made. Re-run with -Fix -WhatIf to preview or -Fix -Apply to execute safe actions." -ForegroundColor Yellow -UseColor $UseColor
+        Write-RemediationPlan -Plan $automaticItems -UseColor $UseColor
+        return
+    }
+
+    foreach ($item in $automaticItems) {
+        $target = "$($item.DriveLetter):"
+        $action = $item.Command
+
+        if (-not $PSCmdlet.ShouldProcess($target, $action)) {
+            continue
+        }
+
+        if (-not $Apply) {
+            continue
+        }
+
+        try {
+            switch ($item.Operation) {
+                "AddRecoveryPassword" {
+                    Add-BitLockerKeyProtector -MountPoint $target -RecoveryPasswordProtector -ErrorAction Stop | Out-Null
+                }
+                "ResumeProtection" {
+                    Resume-BitLocker -MountPoint $target -ErrorAction Stop | Out-Null
+                }
+                "EnableAutoUnlock" {
+                    Enable-BitLockerAutoUnlock -MountPoint $target -ErrorAction Stop | Out-Null
+                }
+                default {
+                    Write-ConsoleLine -Message "Skipped unsupported remediation operation: $($item.Operation)" -ForegroundColor Yellow -UseColor $UseColor
+                    continue
+                }
+            }
+
+            Write-ConsoleLine -Message "Applied: $($item.Title)" -ForegroundColor Green -UseColor $UseColor
+        } catch {
+            Write-ConsoleLine -Message "Failed: $($item.Title) - $($_.Exception.Message)" -ForegroundColor Red -UseColor $UseColor
+        }
     }
 }
 
@@ -459,6 +529,8 @@ function Show-Usage {
     Write-ConsoleLine -Message "  bitdiag -Format Html -OutFile .\report.html -ProblemsOnly" -UseColor $UseColor
     Write-ConsoleLine -Message "  bitdiag -Category Platform,BitLocker -Status Warning,Alert,Error" -UseColor $UseColor
     Write-ConsoleLine -Message "  bitdiag -PlanFixes" -UseColor $UseColor
+    Write-ConsoleLine -Message "  bitdiag -Fix -WhatIf" -UseColor $UseColor
+    Write-ConsoleLine -Message "  bitdiag -Fix -Apply" -UseColor $UseColor
     Write-ConsoleLine -Message "  bitdiag -Version" -UseColor $UseColor
     Write-ConsoleLine -Message "" -UseColor $UseColor
     Write-ConsoleLine -Message "Note: Do not type square brackets from documentation syntax; they only mean optional." -ForegroundColor Gray -UseColor $UseColor
@@ -479,6 +551,9 @@ function Show-Usage {
     Write-ConsoleLine -Message "  -Run                      Run diagnostics instead of opening the interactive menu" -UseColor $UseColor
     Write-ConsoleLine -Message "  -Interactive              Open the interactive menu" -UseColor $UseColor
     Write-ConsoleLine -Message "  -PlanFixes                Generate a remediation plan without changing the system" -UseColor $UseColor
+    Write-ConsoleLine -Message "  -Fix                      Prepare safe automatic remediation candidates" -UseColor $UseColor
+    Write-ConsoleLine -Message "  -Apply                    Execute safe automatic remediation candidates with -Fix" -UseColor $UseColor
+    Write-ConsoleLine -Message "  -WhatIf                   Preview -Fix actions without changing the system" -UseColor $UseColor
     Write-ConsoleLine -Message "  -Version                  Show BitDiag version" -UseColor $UseColor
     Write-ConsoleLine -Message "  -NoExitCode               Do not set process exit code" -UseColor $UseColor
     Write-ConsoleLine -Message "" -UseColor $UseColor
@@ -1753,8 +1828,9 @@ function Invoke-BitDiagInteractive {
         Write-ConsoleLine -Message "  4. Export HTML report" -UseColor $useColor
         Write-ConsoleLine -Message "  5. Export JSON report" -UseColor $useColor
         Write-ConsoleLine -Message "  6. Generate remediation plan" -UseColor $useColor
-        Write-ConsoleLine -Message "  7. Show help" -UseColor $useColor
-        Write-ConsoleLine -Message "  8. Exit" -UseColor $useColor
+        Write-ConsoleLine -Message "  7. Preview safe fixes" -UseColor $useColor
+        Write-ConsoleLine -Message "  8. Show help" -UseColor $useColor
+        Write-ConsoleLine -Message "  9. Exit" -UseColor $useColor
         Write-ConsoleLine -Message "" -UseColor $useColor
 
         $choice = Read-Host "Choose an option"
@@ -1791,15 +1867,16 @@ function Invoke-BitDiagInteractive {
                 return
             }
             "6" { bitdiag -Run -PlanFixes -NoExitCode -Color $Color; return }
-            "7" { bitdiag -Help -NoExitCode -Color $Color; return }
-            "8" { return }
+            "7" { bitdiag -Run -Fix -WhatIf -NoExitCode -Color $Color; return }
+            "8" { bitdiag -Help -NoExitCode -Color $Color; return }
+            "9" { return }
             default { Write-ConsoleLine -Message "Invalid choice." -ForegroundColor Yellow -UseColor $useColor }
         }
     }
 }
 
 function bitdiag {
-    [CmdletBinding()]
+    [CmdletBinding(SupportsShouldProcess = $true)]
     param(
         [Alias("Drive", "Drives")]
         [string[]]$DriveLetters,
@@ -1841,6 +1918,10 @@ function bitdiag {
         [switch]$Interactive,
 
         [switch]$PlanFixes,
+
+        [switch]$Fix,
+
+        [switch]$Apply,
 
         [switch]$Version,
 
@@ -1932,7 +2013,10 @@ function bitdiag {
 
     $reportResults = Select-DiagnosticResults -Results $results -Category $Category -Status $Status -ProblemsOnly:$ProblemsOnly
 
-    if ($PlanFixes) {
+    if ($Fix) {
+        $fixPlan = @(Get-RemediationPlan -Results $reportResults)
+        Invoke-SafeRemediation -Plan $fixPlan -Apply:$Apply -UseColor $useColor
+    } elseif ($PlanFixes) {
         $fixPlan = @(Get-RemediationPlan -Results $reportResults)
         if ($PassThru) {
             $fixPlan
