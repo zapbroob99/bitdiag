@@ -733,6 +733,145 @@ function Test-FileSystem {
     }
 }
 
+function Format-KeyProtectorTypes {
+    param([object[]]$KeyProtectors)
+
+    $types = @(
+        $KeyProtectors |
+            Where-Object { $_.KeyProtectorType } |
+            ForEach-Object { [string]$_.KeyProtectorType } |
+            Select-Object -Unique
+    )
+
+    if (-not $types -or $types.Count -eq 0) {
+        return "None"
+    }
+
+    $types -join ", "
+}
+
+function Test-EncryptionMethod {
+    param(
+        [string]$DriveLetter,
+        [object]$Volume
+    )
+
+    $method = $Volume.PSObject.Properties["EncryptionMethod"]
+    if ($null -eq $method -or [string]::IsNullOrWhiteSpace([string]$Volume.EncryptionMethod)) {
+        return New-CheckResult `
+            -Category "BitLocker" `
+            -CheckName "${DriveLetter}: encryption method" `
+            -Status "Info" `
+            -Message "${DriveLetter}: encryption method is not exposed by this BitLocker provider."
+    }
+
+    if ([string]$Volume.EncryptionMethod -eq "None") {
+        return New-CheckResult `
+            -Category "BitLocker" `
+            -CheckName "${DriveLetter}: encryption method" `
+            -Status "Warning" `
+            -Message "${DriveLetter}: encryption method is None." `
+            -Fix "Enable BitLocker if this volume should be encrypted." `
+            -Details $Volume.EncryptionMethod
+    }
+
+    New-CheckResult `
+        -Category "BitLocker" `
+        -CheckName "${DriveLetter}: encryption method" `
+        -Status "OK" `
+        -Message "${DriveLetter}: encryption method is $($Volume.EncryptionMethod)." `
+        -Details $Volume.EncryptionMethod
+}
+
+function Test-EncryptionScope {
+    param(
+        [string]$DriveLetter,
+        [object]$Volume
+    )
+
+    $percentage = $Volume.PSObject.Properties["EncryptionPercentage"]
+    if ($null -ne $percentage) {
+        $status = if ([int]$Volume.EncryptionPercentage -eq 100) { "OK" } else { "Info" }
+        return New-CheckResult `
+            -Category "BitLocker" `
+            -CheckName "${DriveLetter}: encryption progress" `
+            -Status $status `
+            -Message "${DriveLetter}: encryption percentage is $($Volume.EncryptionPercentage)%." `
+            -Details @{ EncryptionPercentage = $Volume.EncryptionPercentage; VolumeStatus = $Volume.VolumeStatus }
+    }
+
+    New-CheckResult `
+        -Category "BitLocker" `
+        -CheckName "${DriveLetter}: encryption progress" `
+        -Status "Info" `
+        -Message "${DriveLetter}: encryption percentage is not exposed by this BitLocker provider." `
+        -Details $Volume.VolumeStatus
+}
+
+function Test-KeyProtectors {
+    param(
+        [string]$DriveLetter,
+        [object[]]$KeyProtectors
+    )
+
+    $protectorTypes = Format-KeyProtectorTypes -KeyProtectors $KeyProtectors
+    if ($protectorTypes -eq "None") {
+        return New-CheckResult `
+            -Category "BitLocker" `
+            -CheckName "${DriveLetter}: key protectors" `
+            -Status "Warning" `
+            -Message "${DriveLetter}: no BitLocker key protectors were detected." `
+            -Fix "Add a suitable BitLocker protector before relying on this volume for protection."
+    }
+
+    New-CheckResult `
+        -Category "BitLocker" `
+        -CheckName "${DriveLetter}: key protectors" `
+        -Status "OK" `
+        -Message "${DriveLetter}: key protector types: $protectorTypes." `
+        -Details $KeyProtectors
+}
+
+function Test-RecoveryBackupVisibility {
+    param(
+        [string]$DriveLetter,
+        [object[]]$RecoveryProtectors
+    )
+
+    if (-not $RecoveryProtectors -or $RecoveryProtectors.Count -eq 0) {
+        return
+    }
+
+    New-CheckResult `
+        -Category "BitLocker" `
+        -CheckName "${DriveLetter}: recovery backup" `
+        -Status "Info" `
+        -Message "${DriveLetter}: recovery password exists, but local diagnostics cannot verify AD DS or Entra ID backup status." `
+        -Fix "Confirm the recovery key is backed up to your organization-approved location before changing protectors."
+}
+
+function Test-SuspendedProtection {
+    param(
+        [string]$DriveLetter,
+        [object]$Volume
+    )
+
+    if ($Volume.ProtectionStatus -eq "On") {
+        return New-CheckResult `
+            -Category "BitLocker" `
+            -CheckName "${DriveLetter}: suspension" `
+            -Status "OK" `
+            -Message "${DriveLetter}: BitLocker protection is not suspended."
+    }
+
+    New-CheckResult `
+        -Category "BitLocker" `
+        -CheckName "${DriveLetter}: suspension" `
+        -Status "Warning" `
+        -Message "${DriveLetter}: BitLocker protection may be suspended or disabled because protection is $($Volume.ProtectionStatus)." `
+        -Fix "Run: Resume-BitLocker -MountPoint ${DriveLetter}: after confirming recovery keys are backed up."
+}
+
 function Test-BitLockerVolume {
     param([string]$DriveLetter)
 
@@ -759,6 +898,9 @@ function Test-BitLockerVolume {
                 $results += New-CheckResult -Category "BitLocker" -CheckName "${DriveLetter}: encryption" -Status "Info" -Message "${DriveLetter}: encryption status is $($volume.VolumeStatus)." -Details $volume.VolumeStatus
             }
 
+            $results += Test-EncryptionMethod -DriveLetter $DriveLetter -Volume $volume
+            $results += Test-EncryptionScope -DriveLetter $DriveLetter -Volume $volume
+
             if ($volume.ProtectionStatus -eq "On") {
                 $results += New-CheckResult -Category "BitLocker" -CheckName "${DriveLetter}: protection" -Status "OK" -Message "${DriveLetter}: BitLocker protection is on." -Details $volume.ProtectionStatus
             } else {
@@ -771,9 +913,13 @@ function Test-BitLockerVolume {
                     -Details $volume.ProtectionStatus
             }
 
+            $results += Test-SuspendedProtection -DriveLetter $DriveLetter -Volume $volume
+            $results += Test-KeyProtectors -DriveLetter $DriveLetter -KeyProtectors $volume.KeyProtector
+
             $hasRecoveryPassword = $volume.KeyProtector | Where-Object { $_.KeyProtectorType -eq "RecoveryPassword" }
             if ($hasRecoveryPassword) {
                 $results += New-CheckResult -Category "BitLocker" -CheckName "${DriveLetter}: recovery password" -Status "OK" -Message "${DriveLetter}: has a recovery password protector."
+                $results += Test-RecoveryBackupVisibility -DriveLetter $DriveLetter -RecoveryProtectors $hasRecoveryPassword
             } else {
                 $results += New-CheckResult `
                     -Category "BitLocker" `
@@ -814,8 +960,84 @@ function Test-BitLockerVolume {
             $results += New-CheckResult -Category "BitLocker" -CheckName "${DriveLetter}: encryption" -Status "Info" -Message "${DriveLetter}: manage-bde status was collected." -Details $status
         }
 
+        if ($status -match "Encryption Method:\s*(.+)") {
+            $method = $Matches[1].Trim()
+            $methodStatus = if ($method -match "None") { "Warning" } else { "OK" }
+            $methodFix = if ($methodStatus -eq "Warning") { "Enable BitLocker if this volume should be encrypted." } else { $null }
+            $results += New-CheckResult `
+                -Category "BitLocker" `
+                -CheckName "${DriveLetter}: encryption method" `
+                -Status $methodStatus `
+                -Message "${DriveLetter}: encryption method is $method." `
+                -Fix $methodFix `
+                -Details $method
+        }
+
+        if ($status -match "Percentage Encrypted:\s*(.+)") {
+            $percentageText = $Matches[1].Trim()
+            $percentageStatus = if ($percentageText -match "^100(\.0+)?%") { "OK" } else { "Info" }
+            $results += New-CheckResult `
+                -Category "BitLocker" `
+                -CheckName "${DriveLetter}: encryption progress" `
+                -Status $percentageStatus `
+                -Message "${DriveLetter}: encryption percentage is $percentageText." `
+                -Details $percentageText
+        }
+
+        if ($status -match "Protection Status:\s*(.+)") {
+            $protectionText = $Matches[1].Trim()
+            if ($protectionText -match "Protection On") {
+                $results += New-CheckResult -Category "BitLocker" -CheckName "${DriveLetter}: protection" -Status "OK" -Message "${DriveLetter}: BitLocker protection is on." -Details $protectionText
+                $results += New-CheckResult -Category "BitLocker" -CheckName "${DriveLetter}: suspension" -Status "OK" -Message "${DriveLetter}: BitLocker protection is not suspended."
+            } else {
+                $results += New-CheckResult `
+                    -Category "BitLocker" `
+                    -CheckName "${DriveLetter}: protection" `
+                    -Status "Warning" `
+                    -Message "${DriveLetter}: BitLocker protection status is $protectionText." `
+                    -Fix "Run: manage-bde -protectors -enable ${DriveLetter}: after confirming recovery keys are backed up." `
+                    -Details $protectionText
+                $results += New-CheckResult `
+                    -Category "BitLocker" `
+                    -CheckName "${DriveLetter}: suspension" `
+                    -Status "Warning" `
+                    -Message "${DriveLetter}: BitLocker protection may be suspended or disabled." `
+                    -Fix "Run: manage-bde -protectors -enable ${DriveLetter}: after confirming recovery keys are backed up."
+            }
+        }
+
+        $protectorTypes = @()
+        foreach ($protectorName in @("TPM", "TPM And PIN", "Numerical Password", "Recovery Password", "External Key", "Password", "SID")) {
+            if ($protectors -match [regex]::Escape($protectorName)) {
+                $protectorTypes += $protectorName
+            }
+        }
+
+        if ($protectorTypes.Count -gt 0) {
+            $results += New-CheckResult `
+                -Category "BitLocker" `
+                -CheckName "${DriveLetter}: key protectors" `
+                -Status "OK" `
+                -Message "${DriveLetter}: key protector types: $(($protectorTypes | Select-Object -Unique) -join ', ')." `
+                -Details $protectors
+        } else {
+            $results += New-CheckResult `
+                -Category "BitLocker" `
+                -CheckName "${DriveLetter}: key protectors" `
+                -Status "Warning" `
+                -Message "${DriveLetter}: no BitLocker key protectors were detected." `
+                -Fix "Add a suitable BitLocker protector before relying on this volume for protection." `
+                -Details $protectors
+        }
+
         if ($protectors -match "Numerical Password|Recovery Password") {
             $results += New-CheckResult -Category "BitLocker" -CheckName "${DriveLetter}: recovery password" -Status "OK" -Message "${DriveLetter}: has a recovery password protector." -Details $protectors
+            $results += New-CheckResult `
+                -Category "BitLocker" `
+                -CheckName "${DriveLetter}: recovery backup" `
+                -Status "Info" `
+                -Message "${DriveLetter}: recovery password exists, but local diagnostics cannot verify AD DS or Entra ID backup status." `
+                -Fix "Confirm the recovery key is backed up to your organization-approved location before changing protectors."
         } else {
             $results += New-CheckResult `
                 -Category "BitLocker" `
@@ -846,6 +1068,56 @@ function Test-BitLockerVolume {
     }
 }
 
+function Get-BitLockerPolicyInterpretation {
+    param([object[]]$ConfiguredPolicies)
+
+    $knownPolicies = @{
+        UseAdvancedStartup          = "Controls advanced startup authentication options for OS drives."
+        EnableBDEWithNoTPM          = "Controls whether BitLocker can be enabled without a compatible TPM."
+        UseTPM                      = "Controls TPM startup protector usage."
+        UseTPMPIN                   = "Controls TPM+PIN startup protector usage."
+        UseTPMKey                   = "Controls TPM+startup key protector usage."
+        UseTPMKeyPIN                = "Controls TPM+PIN+startup key protector usage."
+        OSRecovery                  = "Controls OS drive recovery options."
+        OSRequireActiveDirectoryBackup = "Controls whether OS drive recovery information must be backed up before BitLocker is enabled."
+        OSActiveDirectoryBackup     = "Controls OS drive recovery backup to Active Directory Domain Services."
+        FDVRecovery                 = "Controls fixed data drive recovery options."
+        FDVRequireActiveDirectoryBackup = "Controls whether fixed data drive recovery information must be backed up before BitLocker is enabled."
+        RDVRecovery                 = "Controls removable data drive recovery options."
+        RDVRequireActiveDirectoryBackup = "Controls whether removable data drive recovery information must be backed up before BitLocker is enabled."
+        EncryptionMethod            = "Controls legacy encryption method policy."
+        EncryptionMethodWithXtsOs   = "Controls OS drive encryption method policy."
+        EncryptionMethodWithXtsFdv  = "Controls fixed data drive encryption method policy."
+        EncryptionMethodWithXtsRdv  = "Controls removable data drive encryption method policy."
+        UsePartialEncryptionKey     = "Controls enhanced PIN or startup key requirements."
+        UseEnhancedPin              = "Controls whether enhanced startup PINs are allowed."
+    }
+
+    $interpretations = @()
+    foreach ($policy in $ConfiguredPolicies) {
+        foreach ($value in $policy.Values) {
+            $parts = $value -split "=", 2
+            if ($parts.Count -ne 2) {
+                continue
+            }
+
+            $name = $parts[0]
+            if (-not $knownPolicies.ContainsKey($name)) {
+                continue
+            }
+
+            $interpretations += [PSCustomObject]@{
+                Path        = $policy.Path
+                Name        = $name
+                Value       = $parts[1]
+                Meaning     = $knownPolicies[$name]
+            }
+        }
+    }
+
+    $interpretations
+}
+
 function Test-BitLockerPolicy {
     $policyPaths = @(
         "HKLM:\SOFTWARE\Policies\Microsoft\FVE",
@@ -874,13 +1146,34 @@ function Test-BitLockerPolicy {
             return New-CheckResult -Category "Policy" -CheckName "BitLocker policy" -Status "OK" -Message "No BitLocker policy registry keys were found."
         }
 
-        New-CheckResult `
+        $results = @()
+        $results += New-CheckResult `
             -Category "Policy" `
             -CheckName "BitLocker policy" `
             -Status "Warning" `
             -Message "BitLocker policy registry keys are configured." `
             -Fix "Review Group Policy or MDM BitLocker settings if encryption or protector changes fail." `
             -Details $configuredPolicies
+
+        $interpretedPolicies = @(Get-BitLockerPolicyInterpretation -ConfiguredPolicies $configuredPolicies)
+        if ($interpretedPolicies.Count -gt 0) {
+            $policyNames = ($interpretedPolicies | Select-Object -ExpandProperty Name -Unique) -join ", "
+            $results += New-CheckResult `
+                -Category "Policy" `
+                -CheckName "BitLocker policy interpretation" `
+                -Status "Info" `
+                -Message "Interpreted BitLocker policy values: $policyNames." `
+                -Details $interpretedPolicies
+        } else {
+            $results += New-CheckResult `
+                -Category "Policy" `
+                -CheckName "BitLocker policy interpretation" `
+                -Status "Info" `
+                -Message "No known BitLocker policy values were recognized for interpretation." `
+                -Details $configuredPolicies
+        }
+
+        $results
     } catch {
         New-CheckResult -Category "Policy" -CheckName "BitLocker policy" -Status "Error" -Message "BitLocker policy check failed: $($_.Exception.Message)"
     }
@@ -929,6 +1222,15 @@ function Get-DriveOverviewValue {
 
             if ($Result.Details) {
                 return [string]$Result.Details
+            }
+        }
+        "Method" {
+            if ($Result.Details) {
+                return [string]$Result.Details
+            }
+
+            if ($Result.Message -match "encryption method is (.+)\.?$") {
+                return $Matches[1].TrimEnd(".")
             }
         }
         "Protection" {
@@ -999,18 +1301,20 @@ function Write-DriveOverview {
 
     $driveWidth = 7
     $encryptedWidth = 12
+    $methodWidth = 14
     $protectionWidth = 12
     $recoveryWidth = 12
     $autoUnlockWidth = 12
-    $fileSystemWidth = [Math]::Max(10, $Width - $driveWidth - $encryptedWidth - $protectionWidth - $recoveryWidth - $autoUnlockWidth - 12)
+    $fileSystemWidth = [Math]::Max(10, $Width - $driveWidth - $encryptedWidth - $methodWidth - $protectionWidth - $recoveryWidth - $autoUnlockWidth - 14)
 
     Write-ConsoleLine -Message "" -UseColor $UseColor
     Write-ConsoleLine -Message "Drive BitLocker overview" -ForegroundColor Cyan -UseColor $UseColor
     Write-Rule -Width $Width -UseColor $UseColor
 
-    $header = "{0}  {1}  {2}  {3}  {4}  {5}" -f `
+    $header = "{0}  {1}  {2}  {3}  {4}  {5}  {6}" -f `
         (Format-ColumnText -Text "Drive" -Width $driveWidth),
         (Format-ColumnText -Text "Encrypted" -Width $encryptedWidth),
+        (Format-ColumnText -Text "Method" -Width $methodWidth),
         (Format-ColumnText -Text "Protection" -Width $protectionWidth),
         (Format-ColumnText -Text "Recovery" -Width $recoveryWidth),
         (Format-ColumnText -Text "AutoUnlock" -Width $autoUnlockWidth),
@@ -1025,14 +1329,16 @@ function Write-DriveOverview {
             $encryption = Get-DriveResult -Results $AllResults -DriveLetter $driveLetter -NamePattern "BitLocker"
         }
 
+        $method = Get-DriveResult -Results $AllResults -DriveLetter $driveLetter -NamePattern "encryption method"
         $protection = Get-DriveResult -Results $AllResults -DriveLetter $driveLetter -NamePattern "protection"
         $recovery = Get-DriveResult -Results $AllResults -DriveLetter $driveLetter -NamePattern "recovery password"
         $autoUnlock = Get-DriveResult -Results $AllResults -DriveLetter $driveLetter -NamePattern "auto-unlock"
-        $status = Get-WorstStatus -Results @($fileSystem, $encryption, $protection, $recovery, $autoUnlock)
+        $status = Get-WorstStatus -Results @($fileSystem, $encryption, $method, $protection, $recovery, $autoUnlock)
 
-        $row = "{0}  {1}  {2}  {3}  {4}  {5}" -f `
+        $row = "{0}  {1}  {2}  {3}  {4}  {5}  {6}" -f `
             (Format-ColumnText -Text "${driveLetter}:" -Width $driveWidth),
             (Format-ColumnText -Text (Get-DriveOverviewValue -Result $encryption -Kind "Encryption") -Width $encryptedWidth),
+            (Format-ColumnText -Text (Get-DriveOverviewValue -Result $method -Kind "Method") -Width $methodWidth),
             (Format-ColumnText -Text (Get-DriveOverviewValue -Result $protection -Kind "Protection") -Width $protectionWidth),
             (Format-ColumnText -Text (Get-DriveOverviewValue -Result $recovery -Kind "Recovery") -Width $recoveryWidth),
             (Format-ColumnText -Text (Get-DriveOverviewValue -Result $autoUnlock -Kind "AutoUnlock") -Width $autoUnlockWidth),

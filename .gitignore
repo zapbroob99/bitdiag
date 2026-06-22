@@ -1,0 +1,17 @@
+# Generated diagnostic reports
+bitlocker-diagnostics-*.json
+bitlocker-diagnostics-*.html
+report.json
+report.html
+
+# PowerShell/local output
+*.log
+*.tmp
+out/
+dist/
+
+# Editor and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

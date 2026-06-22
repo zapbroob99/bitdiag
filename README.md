@@ -12,6 +12,8 @@ It checks platform security, disk layout, BitLocker policy, volume file systems,
 - Detects target drives automatically by default.
 - Shows a quick BitLocker overview for each drive.
 - Groups console output into system, disk layout, policy, and per-drive sections.
+- Reports encryption method, encryption progress, key protector types, recovery backup visibility, and suspended protection signals.
+- Interprets common BitLocker policy registry values when they are present.
 - Provides stable exit codes for automation.
 - Keeps `diagnose.ps1` as a backward-compatible wrapper.
 
@@ -146,9 +148,9 @@ bitdiag -PassThru -Quiet -NoExitCode |
 The report starts with a summary and drive overview:
 
 ```text
-Drive    Encrypted     Protection    Recovery      AutoUnlock    FileSystem
-C:       Yes           On            Present       Unknown       NTFS
-D:       No            Off           Missing       Off           NTFS
+Drive    Encrypted     Method          Protection    Recovery      AutoUnlock    FileSystem
+C:       Yes           XtsAes256       On            Present       Unknown       NTFS
+D:       No            None            Off           Missing       Off           NTFS
 ```
 
 Detailed results are grouped into sections:
