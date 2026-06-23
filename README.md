@@ -12,10 +12,12 @@ It checks platform security, disk layout, BitLocker policy, volume file systems,
 - Detects target drives automatically by default.
 - Shows a quick BitLocker overview for each drive.
 - Groups console output into system, disk layout, policy, and per-drive sections.
+- Keeps the default console view focused on root causes while preserving full detail with `-Detailed`.
 - Reports encryption method, encryption progress, key protector types, recovery backup visibility, and suspended protection signals.
 - Interprets common BitLocker policy registry values when they are present.
 - Provides stable exit codes for automation.
 - Keeps `diagnose.ps1` as a backward-compatible wrapper.
+- Keeps the repository source modular while supporting a generated single-file portable script.
 
 ## Requirements
 
@@ -85,6 +87,28 @@ The legacy script entry point still works:
 .\diagnose.ps1 -ProblemsOnly
 ```
 
+## Portable Single-File Build
+
+The repository uses a modular source layout under `BitDiag\Private` and `BitDiag\Public`. To generate a copy-paste/SCCM-friendly single-file script, run:
+
+```powershell
+.\build.ps1
+```
+
+The generated file is:
+
+```text
+dist\bitdiag.ps1
+```
+
+You can run it without installing the module:
+
+```powershell
+.\dist\bitdiag.ps1 -Run
+.\dist\bitdiag.ps1 -Run -ProblemsOnly
+.\dist\bitdiag.ps1 -Run -EnterpriseReport -OutDirectory "\\server\share\BitDiag" -Quiet -NoExitCode
+```
+
 ## Interactive Mode
 
 Run `bitdiag` without arguments to open the menu:
@@ -103,8 +127,9 @@ Menu options:
 5. Export JSON report
 6. Generate remediation plan
 7. Preview safe fixes
-8. Show help
-9. Exit
+8. Enable BitLocker on unprotected drives
+9. Show help
+10. Exit
 ```
 
 Use `-Run` when you want diagnostics immediately without the menu:
@@ -177,6 +202,8 @@ The remediation plan classifies each item by action type, reason type, risk leve
 [Review / Policy / Medium]
 ```
 
+When a drive is not encrypted, the default remediation plan focuses on the primary BitLocker enablement action and hides dependent actions such as protection resume, key protector creation, recovery password checks, and escrow checks. Use `-Detailed -PlanFixes` to show every dependent remediation item.
+
 Preview safe automatic fixes without changing the system:
 
 ```powershell
@@ -235,6 +262,8 @@ C: Volume / BitLocker
 D: Volume / BitLocker
 ```
 
+When a drive is not encrypted, the default console view shows the primary encryption finding and hides dependent BitLocker checks such as protection, key protector, recovery password, and escrow status. This reduces repeated warnings for the same root cause. Use `-Detailed` to show every collected check.
+
 ## Parameters
 
 | Parameter | Description |
@@ -256,7 +285,7 @@ D: Volume / BitLocker
 | `-Category` | Filter results by category: `Runtime`, `Platform`, `Disk`, `Policy`, `Volume`, `BitLocker`. |
 | `-Status` | Filter results by status: `OK`, `Warning`, `Alert`, `Error`, `Info`. |
 | `-ProblemsOnly` | Show/export only `Warning`, `Alert`, and `Error` results. |
-| `-Detailed` | Include raw diagnostic details in console output. |
+| `-Detailed` | Include raw diagnostic details and dependent BitLocker checks/actions in console or remediation output. |
 | `-Color` | Console color mode: `Auto`, `Always`, or `Never`. |
 | `-Quiet` | Suppress informational console output. Useful for automation. |
 | `-PassThru` | Emit diagnostic result objects to the PowerShell pipeline. |
@@ -358,7 +387,17 @@ BitDiag focuses on the common cases that block BitLocker enablement or make prot
 - BitLocker policy registry keys under `HKLM:\SOFTWARE\Policies\Microsoft\FVE` and `HKLM:\SYSTEM\CurrentControlSet\Policies\Microsoft\FVE`.
 - Fixed/removable drive write-deny policies that can make unencrypted drives read-only.
 - AD DS recovery backup requirement policies.
-- Best-effort AD DS recovery escrow visibility by matching recovery protector IDs when directory access is available.
+- Best-effort AD DS recovery escrow visibility by matching recovery protector IDs when directory access is available. Matching tolerates AD byte-order differences, raw byte-order GUIDs, braces, hyphens, and GUIDs embedded in AD recovery object names.
+
+When validating AD DS recovery escrow in a closed corporate network, run:
+
+```powershell
+.\bitdiag.ps1 -Run -Detailed -Category BitLocker
+```
+
+The detailed recovery backup result shows visible AD recovery object count and comparable protector IDs, but it does not print recovery passwords.
+
+AD DS escrow verification is currently a best-effort feature under development. It depends on the account running BitDiag having delegated permission to read BitLocker recovery objects in AD. If BitDiag is running as a local administrator or another account without that AD permission, it may report that escrow could not be verified even when the recovery password is actually backed up.
 
 BitDiag does not automatically perform destructive storage operations such as Dynamic-to-Basic conversion, partition deletion, formatting, or making MBR partitions inactive. Those remain manual high-risk actions in the remediation plan.
 

@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.7.4
+
+- Improved remediation planning for unencrypted drives by collapsing dependent protector/protection actions behind the primary BitLocker enablement action.
+- Prevents dependent actions such as `Resume-BitLocker` from appearing as safe automatic candidates when the drive is not encrypted.
+- Keeps the full remediation detail available with `-Detailed -PlanFixes`.
+
+## 0.7.3
+
+- Improved default console UX for unencrypted drives by hiding dependent BitLocker checks behind the primary encryption finding.
+- Keeps full detail available with `-Detailed`.
+- Leaves JSON, HTML, enterprise NDJSON, and `-PassThru` output unchanged so automation still receives every finding.
+
+## 0.7.2
+
+- Clarified AD DS recovery escrow verification messages.
+- Marks AD DS escrow verification as a best-effort feature under development when the current account cannot verify escrow.
+- Explains that AD escrow validation requires delegated permission to read BitLocker recovery objects.
+
+## 0.7.1
+
+- Improved AD DS recovery escrow matching for closed enterprise networks.
+- Matches recovery protector IDs across braces, hyphenated/non-hyphenated GUID forms, AD byte order, raw byte order, and GUIDs embedded in AD object names.
+- Adds visible AD recovery object count to detailed recovery backup diagnostics without exporting recovery passwords.
+
+## 0.7.0
+
+- Split the module source into `Private` and `Public` files while keeping `bitdiag` as the only exported command.
+- Converted `BitDiag.psm1` into a lightweight module loader.
+- Added `build.ps1` to generate a portable single-file `dist\bitdiag.ps1` bundle.
+- Updated launchers to suppress PowerShell approved-verb warnings for the CLI-style `bitdiag` command.
+- Added smoke coverage for the portable single-file build.
+
 ## 0.6.0
 
 - Added best-effort AD DS recovery escrow visibility check using recovery protector IDs.

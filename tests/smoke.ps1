@@ -11,6 +11,7 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $modulePath = Join-Path $repoRoot "BitDiag\BitDiag.psd1"
 $launcherPath = Join-Path $repoRoot "bitdiag.ps1"
 $diagnosePath = Join-Path $repoRoot "diagnose.ps1"
+$buildPath = Join-Path $repoRoot "build.ps1"
 
 function Assert-True {
     param(
@@ -30,6 +31,67 @@ $manifest = Test-ModuleManifest -Path $modulePath
 Assert-True -Condition ($manifest.Name -eq "BitDiag") -Message "Module manifest name should be BitDiag."
 Assert-True -Condition ($manifest.ExportedFunctions.Keys -contains "bitdiag") -Message "Module should export bitdiag."
 
+. (Join-Path $repoRoot "BitDiag\Private\00-Core.ps1")
+. (Join-Path $repoRoot "BitDiag\Private\60-Remediation.ps1")
+$syntheticResults = @(
+    [PSCustomObject]@{
+        Timestamp = "2026-01-01T00:00:00"
+        Category  = "BitLocker"
+        CheckName = "D: encryption"
+        Status    = "Warning"
+        Message   = "D: is not encrypted."
+        Fix       = "Enable BitLocker on D:."
+        Details   = $null
+    },
+    [PSCustomObject]@{
+        Timestamp = "2026-01-01T00:00:00"
+        Category  = "BitLocker"
+        CheckName = "D: protection"
+        Status    = "Warning"
+        Message   = "D: BitLocker protection is off."
+        Fix       = "Enable BitLocker on D:."
+        Details   = $null
+    },
+    [PSCustomObject]@{
+        Timestamp = "2026-01-01T00:00:00"
+        Category  = "BitLocker"
+        CheckName = "D: recovery password"
+        Status    = "Warning"
+        Message   = "D: does not have a recovery password protector."
+        Fix       = "Add a recovery password protector."
+        Details   = $null
+    }
+)
+$defaultConsoleResults = Select-ConsoleDiagnosticResults -Results $syntheticResults
+$detailedConsoleResults = Select-ConsoleDiagnosticResults -Results $syntheticResults -Detailed
+Assert-True -Condition (@($defaultConsoleResults).Count -eq 1) -Message "Default console view should collapse dependent BitLocker checks for unencrypted drives."
+Assert-True -Condition (@($detailedConsoleResults).Count -eq 3) -Message "Detailed console view should keep dependent BitLocker checks."
+Assert-True -Condition ($defaultConsoleResults[0].Message -match "use -Detailed") -Message "Collapsed console result should explain how to show dependent checks."
+
+$defaultRemediationPlan = @(Get-RemediationPlan -Results $syntheticResults)
+$detailedRemediationPlan = @(Get-RemediationPlan -Results $syntheticResults -Detailed)
+Assert-True -Condition ($defaultRemediationPlan.Count -eq 1) -Message "Default remediation plan should collapse dependent BitLocker actions for unencrypted drives."
+Assert-True -Condition ($defaultRemediationPlan[0].ReasonType -eq "EncryptionOff") -Message "Collapsed remediation plan should keep the encryption root cause."
+Assert-True -Condition (-not $defaultRemediationPlan[0].CanApply) -Message "Collapsed encryption remediation should not be an automatic candidate."
+Assert-True -Condition ($defaultRemediationPlan[0].Notes -match "use -Detailed") -Message "Collapsed remediation plan should explain how to show dependent actions."
+Assert-True -Condition ($detailedRemediationPlan.Count -eq 3) -Message "Detailed remediation plan should keep dependent BitLocker actions."
+
+$tpmPlan = @(Get-RemediationPlan -Results @(
+    [PSCustomObject]@{
+        Timestamp = "2026-01-01T00:00:00"
+        Category  = "Platform"
+        CheckName = "TPM"
+        Status    = "Warning"
+        Message   = "TPM is not present or could not be detected."
+        Fix       = "Confirm TPM 2.0 support in firmware settings."
+        Details   = $null
+    }
+))
+Assert-True -Condition ($tpmPlan.Count -eq 1) -Message "TPM platform issues should generate one remediation item."
+Assert-True -Condition ($tpmPlan[0].ActionType -eq "Manual") -Message "TPM platform issues should be manual remediation."
+Assert-True -Condition ($tpmPlan[0].ReasonType -eq "Platform") -Message "TPM platform issues should be classified as Platform."
+Assert-True -Condition ($tpmPlan[0].RiskLevel -eq "High") -Message "TPM platform issues should be high risk."
+
 Import-Module $modulePath -Force -DisableNameChecking
 Assert-True -Condition ($null -ne (Get-Command bitdiag -ErrorAction SilentlyContinue)) -Message "bitdiag command should be importable."
 
@@ -46,6 +108,21 @@ Assert-True -Condition ($LASTEXITCODE -eq 0 -or $null -eq $LASTEXITCODE) -Messag
 & $launcherPath -Run -Fix -WhatIf -Quiet -NoExitCode | Out-Null
 & $launcherPath -Run -EnableBitLocker -Quiet -NoExitCode | Out-Null
 & $launcherPath -Run -EnableBitLocker -WhatIf -Quiet -NoExitCode | Out-Null
+
+$portablePath = Join-Path ([System.IO.Path]::GetTempPath()) ("bitdiag-portable-{0}.ps1" -f ([guid]::NewGuid()))
+try {
+    & $buildPath -OutputPath $portablePath | Out-Null
+    Assert-True -Condition (Test-Path $portablePath) -Message "Portable build should create a single-file script."
+
+    $portableVersion = & $portablePath -Version -NoExitCode
+    Assert-True -Condition ($portableVersion -eq $versionOutput) -Message "Portable build should report the same version as the launcher."
+
+    & $portablePath -Help -NoExitCode -Color Never | Out-Null
+} finally {
+    if (Test-Path $portablePath) {
+        Remove-Item -LiteralPath $portablePath -Force
+    }
+}
 
 $enterpriseOut = Join-Path ([System.IO.Path]::GetTempPath()) ("bitdiag-smoke-{0}" -f ([guid]::NewGuid()))
 try {
