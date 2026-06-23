@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.5
+
+- Refined `-EnableBitLocker` output with a ready/blocked/review summary and clearer apply states.
+- Treats recovery password backup verification as a post-enable note, not an enablement blocker.
+- Clarified BitLocker enablement notes for OS and data drives.
+
 ## 0.7.4
 
 - Improved remediation planning for unencrypted drives by collapsing dependent protector/protection actions behind the primary BitLocker enablement action.

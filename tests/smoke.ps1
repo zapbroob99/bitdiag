@@ -33,6 +33,7 @@ Assert-True -Condition ($manifest.ExportedFunctions.Keys -contains "bitdiag") -M
 
 . (Join-Path $repoRoot "BitDiag\Private\00-Core.ps1")
 . (Join-Path $repoRoot "BitDiag\Private\60-Remediation.ps1")
+. (Join-Path $repoRoot "BitDiag\Private\70-EnableBitLocker.ps1")
 $syntheticResults = @(
     [PSCustomObject]@{
         Timestamp = "2026-01-01T00:00:00"
@@ -91,6 +92,41 @@ Assert-True -Condition ($tpmPlan.Count -eq 1) -Message "TPM platform issues shou
 Assert-True -Condition ($tpmPlan[0].ActionType -eq "Manual") -Message "TPM platform issues should be manual remediation."
 Assert-True -Condition ($tpmPlan[0].ReasonType -eq "Platform") -Message "TPM platform issues should be classified as Platform."
 Assert-True -Condition ($tpmPlan[0].RiskLevel -eq "High") -Message "TPM platform issues should be high risk."
+
+$readyEnableItem = New-BitLockerEnablePlanItem `
+    -DriveLetter "C" `
+    -Title "C: ready to enable BitLocker on OS drive" `
+    -ActionType "AutomaticCandidate" `
+    -Reason "C: is not encrypted." `
+    -Command "Enable-BitLocker -MountPoint C: -EncryptionMethod XtsAes256 -UsedSpaceOnly -TpmProtector" `
+    -Notes "Method: XtsAes256. Mode: UsedSpaceOnly. Protectors: TPM + RecoveryPassword. After enabling, verify that the recovery password is backed up." `
+    -ReasonType "EncryptionOff" `
+    -RiskLevel "Medium" `
+    -CanApply:$true `
+    -IsSystemDrive:$true
+$blockedEnableItem = New-BitLockerEnablePlanItem `
+    -DriveLetter "C" `
+    -Title "C: TPM is not ready" `
+    -ActionType "Manual" `
+    -Reason "TPM is required before BitDiag can auto-enable BitLocker on the OS drive." `
+    -Notes "Enable and initialize TPM first, then retry." `
+    -ReasonType "Platform" `
+    -RiskLevel "High" `
+    -IsSystemDrive:$true
+$alreadyEncryptedItem = New-BitLockerEnablePlanItem `
+    -DriveLetter "C" `
+    -Title "C: already encrypted" `
+    -ActionType "Review" `
+    -Reason "C: is already fully encrypted." `
+    -Notes "No BitLocker enable action is needed." `
+    -ReasonType "Other" `
+    -RiskLevel "Low" `
+    -IsSystemDrive:$true
+Assert-True -Condition ((Get-BitLockerEnableApplyText -Item $readyEnableItem) -eq "ready with -Apply") -Message "Ready enablement items should show ready apply text."
+Assert-True -Condition ((Get-BitLockerEnableApplyText -Item $blockedEnableItem) -eq "blocked until resolved") -Message "Manual high-risk enablement items should show blocked apply text."
+Assert-True -Condition ((Get-BitLockerEnableApplyText -Item $alreadyEncryptedItem) -eq "no action needed") -Message "Already encrypted enablement items should show no action text."
+Assert-True -Condition ($readyEnableItem.Notes -notmatch "escrow") -Message "Enablement notes should not present escrow as an enablement blocker."
+Assert-True -Condition ($readyEnableItem.Notes -match "recovery password is backed up") -Message "Enablement notes should include recovery password backup verification."
 
 Import-Module $modulePath -Force -DisableNameChecking
 Assert-True -Condition ($null -ne (Get-Command bitdiag -ErrorAction SilentlyContinue)) -Message "bitdiag command should be importable."

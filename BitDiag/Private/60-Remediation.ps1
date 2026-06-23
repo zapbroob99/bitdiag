@@ -102,7 +102,7 @@ function Get-RemediationPlan {
                     -ActionType "Manual" `
                     -Reason $result.Message `
                     -Command "bitdiag -EnableBitLocker -Drives $drive -Apply" `
-                    -Notes "Enable BitLocker only after TPM, boot layout, policy, and recovery key escrow requirements are reviewed." `
+                    -Notes "Enable BitLocker only after TPM and boot layout prerequisites are reviewed. After enabling, verify that the recovery password is backed up." `
                     -DriveLetter $drive `
                     -ReasonType "EncryptionOff" `
                     -RiskLevel "High"
@@ -118,7 +118,7 @@ function Get-RemediationPlan {
                     -ActionType "AutomaticCandidate" `
                     -Reason $result.Message `
                     -Command "Add-BitLockerKeyProtector -MountPoint ${drive}: -RecoveryPasswordProtector" `
-                    -Notes "Confirm recovery key escrow requirements before or immediately after adding the protector." `
+                    -Notes "After adding the protector, verify that the recovery password is backed up." `
                     -Operation "AddRecoveryPassword" `
                     -DriveLetter $drive `
                     -ReasonType "MissingProtector" `

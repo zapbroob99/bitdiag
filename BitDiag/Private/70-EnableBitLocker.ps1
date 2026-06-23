@@ -104,7 +104,7 @@ function Get-BitLockerEnablePlan {
                 -Reason "PowerShell is not running as administrator." `
                 -Notes "Run PowerShell as Administrator, then retry the same command." `
                 -ReasonType "Runtime" `
-                -RiskLevel "Medium" `
+                -RiskLevel "High" `
                 -IsSystemDrive:$isSystemDrive
             continue
         }
@@ -117,7 +117,7 @@ function Get-BitLockerEnablePlan {
                 -Reason "The BitLocker PowerShell cmdlet is not available in this session." `
                 -Notes "Run on Windows with the BitLocker module available." `
                 -ReasonType "Runtime" `
-                -RiskLevel "Medium" `
+                -RiskLevel "High" `
                 -IsSystemDrive:$isSystemDrive
             continue
         }
@@ -219,11 +219,11 @@ function Get-BitLockerEnablePlan {
 
             $plan += New-BitLockerEnablePlanItem `
                 -DriveLetter $drive `
-                -Title "${drive}: enable BitLocker on OS drive" `
+                -Title "${drive}: ready to enable BitLocker on OS drive" `
                 -ActionType "AutomaticCandidate" `
                 -Reason "${drive}: is not encrypted." `
                 -Command "Enable-BitLocker -MountPoint ${drive}: -EncryptionMethod XtsAes256 -UsedSpaceOnly -TpmProtector; Add-BitLockerKeyProtector -MountPoint ${drive}: -RecoveryPasswordProtector" `
-                -Notes "Uses TPM protector, XtsAes256, and used-space-only encryption. Confirm recovery key escrow after enabling." `
+                -Notes "Method: XtsAes256. Mode: UsedSpaceOnly. Protectors: TPM + RecoveryPassword. After enabling, verify that the recovery password is backed up." `
                 -ReasonType "EncryptionOff" `
                 -RiskLevel "Medium" `
                 -CanApply:$true `
@@ -233,14 +233,14 @@ function Get-BitLockerEnablePlan {
 
         $autoUnlockCommand = if ($canAutoUnlockDataDrives) { "; Enable-BitLockerAutoUnlock -MountPoint ${drive}:" } else { "" }
         $autoUnlockNotes = if ($canAutoUnlockDataDrives) {
-            "Uses a recovery password protector, XtsAes256, used-space-only encryption, and enables auto-unlock because the OS drive is protected."
+            "Method: XtsAes256. Mode: UsedSpaceOnly. Protectors: RecoveryPassword. Auto-unlock: enabled because the OS drive is protected. After enabling, verify that the recovery password is backed up."
         } else {
-            "Uses a recovery password protector, XtsAes256, and used-space-only encryption. Auto-unlock is skipped until the OS drive is fully protected."
+            "Method: XtsAes256. Mode: UsedSpaceOnly. Protectors: RecoveryPassword. Auto-unlock: skipped until the OS drive is fully protected. After enabling, verify that the recovery password is backed up."
         }
 
         $plan += New-BitLockerEnablePlanItem `
             -DriveLetter $drive `
-            -Title "${drive}: enable BitLocker on data drive" `
+            -Title "${drive}: ready to enable BitLocker on data drive" `
             -ActionType "AutomaticCandidate" `
             -Reason "${drive}: is not encrypted." `
             -Command "Enable-BitLocker -MountPoint ${drive}: -EncryptionMethod XtsAes256 -UsedSpaceOnly -RecoveryPasswordProtector$autoUnlockCommand" `
@@ -253,6 +253,24 @@ function Get-BitLockerEnablePlan {
     }
 
     $plan
+}
+
+function Get-BitLockerEnableApplyText {
+    param([object]$Item)
+
+    if ($Item.CanApply) {
+        return "ready with -Apply"
+    }
+
+    if ($Item.Title -match "already encrypted") {
+        return "no action needed"
+    }
+
+    if ($Item.ActionType -eq "Manual" -and $Item.RiskLevel -eq "High") {
+        return "blocked until resolved"
+    }
+
+    "review only"
 }
 
 function Write-BitLockerEnablePlan {
@@ -272,10 +290,16 @@ function Write-BitLockerEnablePlan {
         return
     }
 
+    $readyCount = @($Plan | Where-Object { $_.CanApply }).Count
+    $blockedCount = @($Plan | Where-Object { -not $_.CanApply -and $_.ActionType -eq "Manual" -and $_.RiskLevel -eq "High" }).Count
+    $reviewCount = @($Plan | Where-Object { -not $_.CanApply -and -not ($_.ActionType -eq "Manual" -and $_.RiskLevel -eq "High") -and $_.Title -notmatch "already encrypted" }).Count
+    Write-ConsoleLine -Message ("Summary      : {0} ready / {1} blocked / {2} review" -f $readyCount, $blockedCount, $reviewCount) -ForegroundColor Gray -UseColor $UseColor
+    Write-ConsoleLine -Message "" -UseColor $UseColor
+
     $index = 1
     foreach ($item in $Plan) {
         $color = if ($item.CanApply) { "Yellow" } elseif ($item.RiskLevel -eq "High") { "Red" } else { "Gray" }
-        $applyText = if ($item.CanApply) { "eligible with -Apply" } else { "not applied automatically" }
+        $applyText = Get-BitLockerEnableApplyText -Item $item
         Write-ConsoleLine -Message ("{0,2}. [{1} / {2} / {3}] {4}" -f $index, $item.ActionType, $item.ReasonType, $item.RiskLevel, $item.Title) -ForegroundColor $color -UseColor $UseColor
         Write-ConsoleLine -Message ("    reason  {0}" -f $item.Reason) -ForegroundColor Gray -UseColor $UseColor
         Write-ConsoleLine -Message ("    apply   {0}" -f $applyText) -ForegroundColor Gray -UseColor $UseColor
@@ -309,7 +333,7 @@ function Invoke-BitLockerEnable {
 
     if (-not $Apply -and -not $WhatIfPreference) {
         if (-not $Quiet) {
-            Write-ConsoleLine -Message "No changes were made. Re-run with -EnableBitLocker -WhatIf to preview or -EnableBitLocker -Apply to start encryption." -ForegroundColor Yellow -UseColor $UseColor
+            Write-ConsoleLine -Message "No changes were made. Review the plan below, then re-run with -EnableBitLocker -WhatIf to preview or -EnableBitLocker -Apply to start encryption." -ForegroundColor Yellow -UseColor $UseColor
             Write-BitLockerEnablePlan -Plan $Plan -UseColor $UseColor
         }
         return

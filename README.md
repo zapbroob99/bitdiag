@@ -366,7 +366,11 @@ BitDiag keeps this flow simple:
 - Data drive enablement also enables auto-unlock when the OS drive is already fully protected.
 - OS drive enablement uses a TPM protector and then ensures a recovery password protector exists.
 
-After enabling BitLocker, confirm recovery key escrow in your organization-approved location.
+Recovery password backup verification is a post-enable note, not an enablement blocker:
+
+```text
+After enabling, verify that the recovery password is backed up.
+```
 
 ## Troubleshooting Coverage
 
