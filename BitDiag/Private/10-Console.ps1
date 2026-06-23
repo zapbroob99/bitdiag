@@ -195,6 +195,7 @@ function Show-Usage {
     Write-ConsoleLine -Message "  bitdiag -Category Platform,BitLocker -Status Warning,Alert,Error" -UseColor $UseColor
     Write-ConsoleLine -Message "  bitdiag -PlanFixes" -UseColor $UseColor
     Write-ConsoleLine -Message "  bitdiag -Fix -WhatIf" -UseColor $UseColor
+    Write-ConsoleLine -Message "  bitdiag -Fix -Risky -WhatIf" -UseColor $UseColor
     Write-ConsoleLine -Message "  bitdiag -Fix -Apply" -UseColor $UseColor
     Write-ConsoleLine -Message "  bitdiag -EnableBitLocker" -UseColor $UseColor
     Write-ConsoleLine -Message "  bitdiag -EnableBitLocker -Apply" -UseColor $UseColor
@@ -219,7 +220,8 @@ function Show-Usage {
     Write-ConsoleLine -Message "  -Run                      Run diagnostics instead of opening the interactive menu" -UseColor $UseColor
     Write-ConsoleLine -Message "  -Interactive              Open the interactive menu" -UseColor $UseColor
     Write-ConsoleLine -Message "  -PlanFixes                Generate a remediation plan without changing the system" -UseColor $UseColor
-    Write-ConsoleLine -Message "  -Fix                      Prepare safe automatic remediation candidates" -UseColor $UseColor
+    Write-ConsoleLine -Message "  -Fix                      Prepare automatic remediation candidates" -UseColor $UseColor
+    Write-ConsoleLine -Message "  -Risky                    Include boot-risky automatic remediation candidates with -Fix" -UseColor $UseColor
     Write-ConsoleLine -Message "  -Apply                    Execute -Fix candidates or start eligible -EnableBitLocker actions" -UseColor $UseColor
     Write-ConsoleLine -Message "  -EnableBitLocker          Prepare BitLocker enablement for eligible unencrypted fixed drives" -UseColor $UseColor
     Write-ConsoleLine -Message "  -WhatIf                   Preview -Fix or -EnableBitLocker actions without changing the system" -UseColor $UseColor

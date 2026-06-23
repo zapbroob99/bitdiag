@@ -204,6 +204,29 @@ function Get-DefaultReportPath {
     ".\bitlocker-diagnostics-$((Get-Date).ToString("yyyyMMdd-HHmmss")).$extension"
 }
 
+function Resolve-ReportPath {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path,
+
+        [Parameter(Mandatory)]
+        [ValidateSet("Json", "Html")]
+        [string]$Format
+    )
+
+    $extension = switch ($Format) {
+        "Json" { ".json" }
+        "Html" { ".html" }
+    }
+
+    $leaf = Split-Path -Path $Path -Leaf
+    if ([string]::IsNullOrWhiteSpace([System.IO.Path]::GetExtension($leaf))) {
+        return "$Path$extension"
+    }
+
+    $Path
+}
+
 function Get-DiagnosticsExitCode {
     param([object[]]$Results)
 

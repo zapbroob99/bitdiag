@@ -126,7 +126,7 @@ Menu options:
 4. Export HTML report
 5. Export JSON report
 6. Generate remediation plan
-7. Preview safe fixes
+7. Preview automatic fixes
 8. Enable BitLocker on unprotected drives
 9. Show help
 10. Exit
@@ -176,6 +176,13 @@ Generate an HTML report:
 bitdiag -Format Html -OutFile .\report.html
 ```
 
+If `-OutFile` has no extension, BitDiag appends the expected extension automatically:
+
+```powershell
+bitdiag -Format Html -OutFile .\report
+# writes .\report.html
+```
+
 Filter by category and status:
 
 ```powershell
@@ -194,7 +201,7 @@ Generate a remediation plan without changing the system:
 bitdiag -PlanFixes
 ```
 
-The remediation plan classifies each item by action type, reason type, risk level, and whether it is safe to apply automatically:
+The remediation plan classifies each item by action type, reason type, risk level, and whether BitDiag can apply it automatically:
 
 ```text
 [AutomaticCandidate / MissingProtector / Low]
@@ -216,16 +223,32 @@ steps
   5. Run: bitdiag -Run
 ```
 
-Preview safe automatic fixes without changing the system:
+Some BIOS-free system actions can be applied explicitly with `-Fix -Apply` after review:
+
+```text
+BdeHdCfg.exe -target default -size 550
+mbr2gpt.exe /validate /allowFullOS
+```
+
+Firmware/BIOS-dependent actions such as enabling Secure Boot or enabling TPM remain guided manual steps.
+
+Preview automatic remediation candidates without changing the system:
 
 ```powershell
 bitdiag -Fix -WhatIf
 ```
 
-Apply only safe automatic fixes:
+Apply automatic remediation candidates selected by BitDiag:
 
 ```powershell
 bitdiag -Fix -Apply
+```
+
+Preview and apply boot-risky automatic candidates:
+
+```powershell
+bitdiag -Fix -Risky -WhatIf
+bitdiag -Fix -Risky -Apply
 ```
 
 Show which unencrypted fixed drives can have BitLocker enabled:
@@ -284,8 +307,9 @@ When a drive is not encrypted, the default console view shows the primary encryp
 | `-Interactive` | Open the interactive menu explicitly. |
 | `-Version` | Show the installed BitDiag version. |
 | `-PlanFixes` | Generate a remediation plan without changing the system. |
-| `-Fix` | Prepare safe automatic remediation candidates. Does not change the system by itself. |
-| `-Apply` | Execute safe automatic remediation candidates with `-Fix` or start eligible `-EnableBitLocker` actions. |
+| `-Fix` | Prepare automatic remediation candidates. Does not change the system by itself. |
+| `-Risky` | Include boot-risky automatic remediation candidates with `-Fix`. |
+| `-Apply` | Execute remediation candidates with `-Fix` or start eligible `-EnableBitLocker` actions. |
 | `-EnableBitLocker` | Prepare BitLocker enablement for eligible unencrypted fixed drives. Requires `-Apply` to start encryption. |
 | `-WhatIf` | Preview `-Fix` or `-EnableBitLocker` actions without changing the system. |
 | `-EnterpriseReport` | Write flat NDJSON for SCCM-triggered Power BI reporting. |
@@ -293,7 +317,7 @@ When a drive is not encrypted, the default console view shows the primary encryp
 | `-Drives`, `-DriveLetters` | Drive letters to inspect. If omitted, detected fixed/removable drives are checked automatically. |
 | `-AllDrives` | Discover fixed/removable volumes automatically. This is also the default when `-Drives` is omitted. |
 | `-Format`, `-OutputFormat` | Output format: `Console`, `Json`, `Html`, or `None`. |
-| `-OutFile`, `-OutputPath` | Destination path for JSON or HTML output. |
+| `-OutFile`, `-OutputPath` | Destination path for JSON or HTML output. Missing `.json`/`.html` extensions are added automatically. |
 | `-Category` | Filter results by category: `Runtime`, `Platform`, `Disk`, `Policy`, `Volume`, `BitLocker`. |
 | `-Status` | Filter results by status: `OK`, `Warning`, `Alert`, `Error`, `Info`. |
 | `-ProblemsOnly` | Show/export only `Warning`, `Alert`, and `Error` results. |
@@ -347,15 +371,22 @@ Fix, ReasonType, RiskLevel, CanApply, ExitCode
 
 BitDiag writes to a local temp file, copies to a remote `.tmp` file, then renames to final `.ndjson`. This prevents Power BI from reading half-written files. Enterprise export intentionally excludes raw `Details` values and does not export recovery passwords.
 
-## Safe Remediation
+## Automatic Remediation
 
-`bitdiag -Fix -Apply` is intentionally limited to low-risk actions:
+`bitdiag -Fix -Apply` applies only remediation candidates that BitDiag can map to a bounded command. It includes low-risk actions such as:
 
 - Add a missing recovery password protector.
 - Resume BitLocker protection when protection appears suspended/off.
 - Enable auto-unlock for data drives.
 
-BitDiag does not automatically change firmware settings, convert MBR/GPT layouts, edit BitLocker policy registry values, or enable Secure Boot. Those items remain manual or review-only recommendations.
+It can also apply BIOS-free system actions after review, such as:
+
+- Repair/create the system partition with `BdeHdCfg.exe -target default -size 550`.
+- Run `mbr2gpt.exe /validate /allowFullOS` validation.
+
+With explicit `-Risky`, BitDiag can also apply boot-risky Windows-side changes when the target partition is detected, such as making a non-system active MBR partition inactive.
+
+BitDiag does not automatically change firmware settings, run MBR/GPT conversion, edit BitLocker policy registry values, or enable Secure Boot/TPM. Those items remain guided manual recommendations.
 
 ## Enabling BitLocker
 

@@ -17,7 +17,7 @@ function Invoke-BitDiagInteractive {
         Write-ConsoleLine -Message "  4. Export HTML report" -UseColor $useColor
         Write-ConsoleLine -Message "  5. Export JSON report" -UseColor $useColor
         Write-ConsoleLine -Message "  6. Generate remediation plan" -UseColor $useColor
-        Write-ConsoleLine -Message "  7. Preview safe fixes" -UseColor $useColor
+        Write-ConsoleLine -Message "  7. Preview automatic fixes" -UseColor $useColor
         Write-ConsoleLine -Message "  8. Enable BitLocker on unprotected drives" -UseColor $useColor
         Write-ConsoleLine -Message "  9. Show help" -UseColor $useColor
         Write-ConsoleLine -Message "  10. Exit" -UseColor $useColor
@@ -119,6 +119,8 @@ function bitdiag {
         [switch]$PlanFixes,
 
         [switch]$Fix,
+
+        [switch]$Risky,
 
         [switch]$EnableBitLocker,
 
@@ -231,7 +233,7 @@ function bitdiag {
         Invoke-BitLockerEnable -Plan $enablePlan -Apply:$Apply -Quiet:$Quiet -UseColor $useColor
     } elseif ($Fix) {
         $fixPlan = @(Get-RemediationPlan -Results $reportResults)
-        Invoke-SafeRemediation -Plan $fixPlan -Apply:$Apply -UseColor $useColor
+        Invoke-SafeRemediation -Plan $fixPlan -Apply:$Apply -Risky:$Risky -UseColor $useColor
     } elseif ($PlanFixes) {
         $fixPlan = @(Get-RemediationPlan -Results $reportResults -Detailed:$Detailed)
         if ($PassThru) {
@@ -251,6 +253,7 @@ function bitdiag {
                 if (-not $OutputPath) {
                     $OutputPath = Get-DefaultReportPath -Format $OutputFormat
                 }
+                $OutputPath = Resolve-ReportPath -Path $OutputPath -Format $OutputFormat
 
                 Export-JsonReport -Results $reportResults -Path $OutputPath
                 if (-not $Quiet) {
@@ -261,6 +264,7 @@ function bitdiag {
                 if (-not $OutputPath) {
                     $OutputPath = Get-DefaultReportPath -Format $OutputFormat
                 }
+                $OutputPath = Resolve-ReportPath -Path $OutputPath -Format $OutputFormat
 
                 Export-HtmlReport -Results $reportResults -Path $OutputPath
                 if (-not $Quiet) {

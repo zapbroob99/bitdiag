@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.7.9
+
+- Automatically appends `.html` or `.json` when an export path is provided without a file extension.
+- Fixes interactive HTML export names so double-clicking the generated file opens it as an HTML report.
+
+## 0.7.8
+
+- Added `-Risky` for explicitly including boot-risky automatic remediation candidates with `-Fix`.
+- Adds an automatic risky candidate for making a detected non-system active MBR partition inactive with `Set-Partition -IsActive $false`.
+- Keeps risky candidates out of normal `-Fix -Apply` unless `-Risky` is provided.
+
+## 0.7.7
+
+- Expanded `-Fix -Apply` to include BIOS-free system actions when BitDiag can select a bounded command.
+- Allows `BdeHdCfg.exe -target default -size 550` to be applied explicitly for ESP repair candidates.
+- Allows `mbr2gpt.exe /validate /allowFullOS` to be applied explicitly as a validation action while keeping conversion and firmware changes manual.
+- Keeps firmware/BIOS-dependent actions such as Secure Boot and TPM enablement as guided manual steps.
+
 ## 0.7.6
 
 - Added guided manual remediation steps for high-risk actions that BitDiag should not apply automatically.

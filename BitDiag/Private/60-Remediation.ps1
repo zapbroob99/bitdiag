@@ -28,10 +28,18 @@ function New-FixPlanItem {
         [string]$ReasonType = "Other",
 
         [ValidateSet("Low", "Medium", "High")]
-        [string]$RiskLevel = "Medium"
+        [string]$RiskLevel = "Medium",
+
+        [bool]$CanApply = $false,
+
+        [bool]$RequiresRisky = $false,
+
+        [int]$DiskNumber = -1,
+
+        [int]$PartitionNumber = -1
     )
 
-    $canApply = [bool]($ActionType -eq "AutomaticCandidate" -and $Operation -and $DriveLetter -and $RiskLevel -eq "Low")
+    $canApply = [bool]($CanApply -or ($ActionType -eq "AutomaticCandidate" -and $Operation -and $DriveLetter -and $RiskLevel -eq "Low"))
 
     [PSCustomObject]@{
         Title      = $Title
@@ -46,7 +54,32 @@ function New-FixPlanItem {
         AutoApplyReason = $AutoApplyReason
         Operation  = $Operation
         DriveLetter = $DriveLetter
+        RequiresRisky = $RequiresRisky
+        DiskNumber = $DiskNumber
+        PartitionNumber = $PartitionNumber
     }
+}
+
+function Get-ResultDetailValue {
+    param(
+        [object]$Details,
+        [string]$Name
+    )
+
+    if ($null -eq $Details) {
+        return $null
+    }
+
+    if ($Details -is [System.Collections.IDictionary] -and $Details.Contains($Name)) {
+        return $Details[$Name]
+    }
+
+    $property = $Details.PSObject.Properties[$Name]
+    if ($property) {
+        return $property.Value
+    }
+
+    $null
 }
 
 function Get-RemediationPlan {
@@ -186,7 +219,7 @@ function Get-RemediationPlan {
             continue
         }
 
-        if ($result.Category -eq "Platform" -and $result.Message -match "Access denied|access is denied|proper privileges|check failed") {
+        if ($result.Category -eq "Platform" -and $result.CheckName -ne "TPM" -and $result.Message -match "Access denied|access is denied|proper privileges|check failed|could not be detected") {
             $plan += New-FixPlanItem `
                 -Title "Run platform checks as administrator" `
                 -ActionType "Review" `
@@ -265,11 +298,11 @@ function Get-RemediationPlan {
         if ($result.CheckName -match "EFI System Partition|^ESP on" -and $result.Status -in @("Warning", "Alert", "Error")) {
             $plan += New-FixPlanItem `
                 -Title "Repair or create EFI System Partition" `
-                -ActionType "Manual" `
+                -ActionType "AutomaticCandidate" `
                 -Reason $result.Message `
                 -Command "BdeHdCfg.exe -target default -size 550" `
                 -Notes "Validate backups first. If the OS volume cannot shrink, review Event Viewer and move or back up blocking files before retrying." `
-                -AutoApplyReason "System partition changes can affect boot and must be reviewed on the target device." `
+                -AutoApplyReason "BIOS access is not required, but this can change system partition layout and may request a reboot." `
                 -Steps @(
                     "Back up the device or confirm a recovery path.",
                     "Open an elevated PowerShell or Command Prompt.",
@@ -277,51 +310,87 @@ function Get-RemediationPlan {
                     "Reboot if Windows asks you to.",
                     "Run: bitdiag -Run"
                 ) `
+                -Operation "RepairSystemPartition" `
                 -ReasonType "DiskLayout" `
-                -RiskLevel "High"
+                -RiskLevel "High" `
+                -CanApply:$true
             continue
         }
 
         if ($result.CheckName -match "active MBR partition" -and $result.Status -in @("Warning", "Alert", "Error")) {
-            $plan += New-FixPlanItem `
-                -Title "Review active MBR partition on secondary disk" `
-                -ActionType "Manual" `
-                -Reason $result.Message `
-                -Command "diskpart -> select disk X -> list partition -> select partition Y -> inactive" `
-                -Notes "Only make a partition inactive after confirming it is not required for boot and backups exist." `
-                -AutoApplyReason "Changing active/inactive partition flags can make Windows unbootable if the wrong partition is selected." `
-                -Steps @(
-                    "Confirm the disk and partition number from Disk Management or BitDiag output.",
-                    "Open an elevated Command Prompt.",
-                    "Run: diskpart",
-                    "Run: list disk",
-                    "Run: select disk X",
-                    "Run: list partition",
-                    "Run: select partition Y",
-                    "Run: inactive",
-                    "Run: exit",
-                    "Run: bitdiag -Run"
-                ) `
-                -ReasonType "DiskLayout" `
-                -RiskLevel "High"
+            $activeDrive = Get-ResultDetailValue -Details $result.Details -Name "DriveLetter"
+            $diskNumber = Get-ResultDetailValue -Details $result.Details -Name "DiskNumber"
+            $partitionNumber = Get-ResultDetailValue -Details $result.Details -Name "PartitionNumber"
+            $systemDrive = if ($env:SystemDrive) { $env:SystemDrive.TrimEnd(":").ToUpperInvariant() } else { "C" }
+            $hasTarget = ($null -ne $diskNumber -and $null -ne $partitionNumber -and -not [string]::IsNullOrWhiteSpace([string]$activeDrive))
+            $activeDriveText = if ($activeDrive) { ([string]$activeDrive).TrimEnd(":").ToUpperInvariant() } else { "" }
+
+            if ($hasTarget -and $activeDriveText -ne $systemDrive) {
+                $plan += New-FixPlanItem `
+                    -Title "${activeDriveText}: make active MBR partition inactive" `
+                    -ActionType "AutomaticCandidate" `
+                    -Reason $result.Message `
+                    -Command "Set-Partition -DiskNumber $diskNumber -PartitionNumber $partitionNumber -IsActive `$false" `
+                    -Notes "This is intended for secondary data disks only. It requires -Risky because selecting the wrong partition can affect boot." `
+                    -AutoApplyReason "BIOS access is not required, but changing active flags is boot-risky and requires explicit -Risky." `
+                    -Steps @(
+                        "Confirm $activeDriveText`: is not the Windows system or boot volume.",
+                        "Preview with: bitdiag -Fix -Risky -WhatIf",
+                        "Apply with: bitdiag -Fix -Risky -Apply",
+                        "Run: bitdiag -Run"
+                    ) `
+                    -Operation "SetPartitionInactive" `
+                    -DriveLetter $activeDriveText `
+                    -ReasonType "DiskLayout" `
+                    -RiskLevel "High" `
+                    -CanApply:$true `
+                    -RequiresRisky:$true `
+                    -DiskNumber ([int]$diskNumber) `
+                    -PartitionNumber ([int]$partitionNumber)
+            } else {
+                $plan += New-FixPlanItem `
+                    -Title "Review active MBR partition on secondary disk" `
+                    -ActionType "Manual" `
+                    -Reason $result.Message `
+                    -Command "diskpart -> select disk X -> list partition -> select partition Y -> inactive" `
+                    -Notes "Only make a partition inactive after confirming it is not required for boot and backups exist." `
+                    -AutoApplyReason "Changing active/inactive partition flags can make Windows unbootable if the wrong partition is selected." `
+                    -Steps @(
+                        "Confirm the disk and partition number from Disk Management or BitDiag output.",
+                        "Open an elevated Command Prompt.",
+                        "Run: diskpart",
+                        "Run: list disk",
+                        "Run: select disk X",
+                        "Run: list partition",
+                        "Run: select partition Y",
+                        "Run: inactive",
+                        "Run: exit",
+                        "Run: bitdiag -Run"
+                    ) `
+                    -ReasonType "DiskLayout" `
+                    -RiskLevel "High"
+            }
             continue
         }
 
-        if ($result.CheckName -match "partition style|TPM \\+ boot mode|Boot mode" -and $result.Status -in @("Warning", "Alert", "Error")) {
+        if ($result.CheckName -match "partition style|TPM \\+ boot mode" -and $result.Status -in @("Warning", "Alert", "Error")) {
             $plan += New-FixPlanItem `
-                -Title "Review boot and disk layout before changing firmware or partitioning" `
-                -ActionType "Manual" `
+                -Title "Validate boot and disk layout before changing firmware or partitioning" `
+                -ActionType "AutomaticCandidate" `
                 -Reason $result.Message `
+                -Command "mbr2gpt.exe /validate /allowFullOS" `
                 -Notes "MBR/GPT conversion, firmware mode changes, and boot partition changes require a separate backup and migration plan." `
-                -AutoApplyReason "Boot mode and partition layout changes can break startup if applied blindly." `
+                -AutoApplyReason "BitDiag can run validation automatically, but conversion or firmware changes remain manual." `
                 -Steps @(
                     "Back up the device or confirm a recovery path.",
                     "If conversion is being considered, run: mbr2gpt.exe /validate /allowFullOS",
                     "Do not convert or change firmware mode until validation succeeds and the migration path is approved.",
                     "After approved changes, boot Windows and run: bitdiag -Run"
                 ) `
+                -Operation "ValidateMbr2Gpt" `
                 -ReasonType "DiskLayout" `
-                -RiskLevel "High"
+                -RiskLevel "High" `
+                -CanApply:$true
             continue
         }
 
@@ -396,12 +465,23 @@ function Write-RemediationPlan {
             default              { "Gray" }
         }
 
-        $applyText = if ($item.CanApply) { "safe automatic candidate" } else { "manual/review only" }
+        $applyText = if ($item.CanApply) {
+            if ($item.RequiresRisky) { "risk accepted with -Risky -Apply" }
+            elseif ($item.RiskLevel -eq "Low") { "safe automatic candidate" }
+            else { "automatic with -Apply after review" }
+        } else {
+            "manual/review only"
+        }
         Write-ConsoleLine -Message ("{0,2}. [{1} / {2} / {3}] {4}" -f $index, $item.ActionType, $item.ReasonType, $item.RiskLevel, $item.Title) -ForegroundColor $color -UseColor $UseColor
         Write-ConsoleLine -Message ("    reason  {0}" -f $item.Reason) -ForegroundColor Gray -UseColor $UseColor
         Write-ConsoleLine -Message ("    apply   {0}" -f $applyText) -ForegroundColor Gray -UseColor $UseColor
         if ($item.AutoApplyReason) {
-            $autoText = if ($item.CanApply) { "yes" } else { "no - $($item.AutoApplyReason)" }
+            $autoPrefix = if ($item.CanApply) {
+                if ($item.RequiresRisky) { "yes with -Risky" } else { "yes" }
+            } else {
+                "no"
+            }
+            $autoText = "$autoPrefix - $($item.AutoApplyReason)"
             Write-ConsoleLine -Message ("    auto    {0}" -f $autoText) -ForegroundColor DarkGray -UseColor $UseColor
         }
         if ($item.Command) {
@@ -427,23 +507,31 @@ function Invoke-SafeRemediation {
     param(
         [object[]]$Plan,
         [switch]$Apply,
+        [switch]$Risky,
         [bool]$UseColor = $true
     )
 
-    $automaticItems = @($Plan | Where-Object { $_.CanApply -and $_.Operation -and $_.DriveLetter })
+    $riskFilteredItems = @($Plan | Where-Object { $_.CanApply -and $_.Operation })
+    $automaticItems = @($riskFilteredItems | Where-Object { $Risky -or -not $_.RequiresRisky })
     if (-not $automaticItems -or $automaticItems.Count -eq 0) {
-        Write-ConsoleLine -Message "No safe automatic remediation candidates were found." -ForegroundColor Yellow -UseColor $UseColor
+        $riskyCount = @($riskFilteredItems | Where-Object { $_.RequiresRisky }).Count
+        if ($riskyCount -gt 0 -and -not $Risky) {
+            Write-ConsoleLine -Message "Only risky automatic remediation candidates were found. Re-run with -Fix -Risky -WhatIf to preview or -Fix -Risky -Apply to execute them." -ForegroundColor Yellow -UseColor $UseColor
+        } else {
+            Write-ConsoleLine -Message "No automatic remediation candidates were found." -ForegroundColor Yellow -UseColor $UseColor
+        }
         return
     }
 
     if (-not $Apply -and -not $WhatIfPreference) {
-        Write-ConsoleLine -Message "No changes were made. Re-run with -Fix -WhatIf to preview or -Fix -Apply to execute safe actions." -ForegroundColor Yellow -UseColor $UseColor
+        $riskHint = if ($Risky) { " Risky candidates are included." } else { "" }
+        Write-ConsoleLine -Message "No changes were made. Re-run with -Fix -WhatIf to preview or -Fix -Apply to execute automatic actions.$riskHint" -ForegroundColor Yellow -UseColor $UseColor
         Write-RemediationPlan -Plan $automaticItems -UseColor $UseColor
         return
     }
 
     foreach ($item in $automaticItems) {
-        $target = "$($item.DriveLetter):"
+        $target = if ($item.DriveLetter) { "$($item.DriveLetter):" } else { $item.Title }
         $action = $item.Command
 
         if (-not $PSCmdlet.ShouldProcess($target, $action)) {
@@ -464,6 +552,27 @@ function Invoke-SafeRemediation {
                 }
                 "EnableAutoUnlock" {
                     Enable-BitLockerAutoUnlock -MountPoint $target -ErrorAction Stop | Out-Null
+                }
+                "RepairSystemPartition" {
+                    $tool = Get-Command BdeHdCfg.exe -ErrorAction Stop
+                    $process = Start-Process -FilePath $tool.Source -ArgumentList @("-target", "default", "-size", "550") -Wait -PassThru -WindowStyle Hidden
+                    if ($process.ExitCode -ne 0) {
+                        throw "BdeHdCfg.exe exited with code $($process.ExitCode)."
+                    }
+                }
+                "ValidateMbr2Gpt" {
+                    $tool = Get-Command mbr2gpt.exe -ErrorAction Stop
+                    $process = Start-Process -FilePath $tool.Source -ArgumentList @("/validate", "/allowFullOS") -Wait -PassThru -WindowStyle Hidden
+                    if ($process.ExitCode -ne 0) {
+                        throw "mbr2gpt.exe validation exited with code $($process.ExitCode)."
+                    }
+                }
+                "SetPartitionInactive" {
+                    if ($item.DiskNumber -lt 0 -or $item.PartitionNumber -lt 0) {
+                        throw "Disk and partition numbers are required to make a partition inactive."
+                    }
+
+                    Set-Partition -DiskNumber $item.DiskNumber -PartitionNumber $item.PartitionNumber -IsActive $false -ErrorAction Stop
                 }
                 default {
                     Write-ConsoleLine -Message "Skipped unsupported remediation operation: $($item.Operation)" -ForegroundColor Yellow -UseColor $UseColor

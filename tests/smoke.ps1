@@ -109,7 +109,9 @@ $espPlan = @(Get-RemediationPlan -Results @(
 Assert-True -Condition ($espPlan.Count -eq 1) -Message "ESP findings should generate one remediation item."
 Assert-True -Condition ($espPlan[0].Command -match "BdeHdCfg\.exe") -Message "ESP remediation should use BdeHdCfg.exe."
 Assert-True -Condition (@($espPlan[0].Steps).Count -ge 5) -Message "ESP remediation should include guided manual steps."
-Assert-True -Condition ($espPlan[0].AutoApplyReason -match "boot") -Message "ESP remediation should explain why it is not automatic."
+Assert-True -Condition ($espPlan[0].CanApply) -Message "ESP remediation should be explicitly applicable with -Fix -Apply."
+Assert-True -Condition ($espPlan[0].Operation -eq "RepairSystemPartition") -Message "ESP remediation should use the RepairSystemPartition operation."
+Assert-True -Condition ($espPlan[0].AutoApplyReason -match "BIOS") -Message "ESP remediation should explain that BIOS access is not required."
 
 $diskAccessPlan = @(Get-RemediationPlan -Results @(
     [PSCustomObject]@{
@@ -139,6 +141,44 @@ $platformAccessPlan = @(Get-RemediationPlan -Results @(
 ))
 Assert-True -Condition ($platformAccessPlan.Count -eq 1) -Message "Platform access failures should generate one remediation item."
 Assert-True -Condition ($platformAccessPlan[0].Title -eq "Run platform checks as administrator") -Message "Platform access failures should not be presented as firmware changes."
+
+$layoutPlan = @(Get-RemediationPlan -Results @(
+    [PSCustomObject]@{
+        Timestamp = "2026-01-01T00:00:00"
+        Category  = "Disk"
+        CheckName = "Partition style"
+        Status    = "Warning"
+        Message   = "Disk 0 uses MBR while UEFI/GPT is expected."
+        Fix       = $null
+        Details   = $null
+    }
+))
+Assert-True -Condition ($layoutPlan.Count -eq 1) -Message "Boot layout findings should generate one remediation item."
+Assert-True -Condition ($layoutPlan[0].CanApply) -Message "Boot layout validation should be explicitly applicable with -Fix -Apply."
+Assert-True -Condition ($layoutPlan[0].Operation -eq "ValidateMbr2Gpt") -Message "Boot layout remediation should use validation, not conversion."
+Assert-True -Condition ($layoutPlan[0].Command -match "mbr2gpt\.exe /validate") -Message "Boot layout remediation should run mbr2gpt validation."
+
+$activePartitionPlan = @(Get-RemediationPlan -Results @(
+    [PSCustomObject]@{
+        Timestamp = "2026-01-01T00:00:00"
+        Category  = "Disk"
+        CheckName = "D: active MBR partition"
+        Status    = "Warning"
+        Message   = "Disk 1, partition 1 is active (D:)."
+        Fix       = "If this is a secondary MBR data disk, make the partition inactive only after validating boot layout and backups."
+        Details   = @{
+            DiskNumber      = 1
+            PartitionNumber = 1
+            DriveLetter     = "D"
+            IsActive        = $true
+        }
+    }
+))
+Assert-True -Condition ($activePartitionPlan.Count -eq 1) -Message "Active secondary partition findings should generate one remediation item."
+Assert-True -Condition ($activePartitionPlan[0].CanApply) -Message "Active secondary partition remediation should be applicable with -Risky."
+Assert-True -Condition ($activePartitionPlan[0].RequiresRisky) -Message "Active secondary partition remediation should require -Risky."
+Assert-True -Condition ($activePartitionPlan[0].Operation -eq "SetPartitionInactive") -Message "Active secondary partition remediation should use SetPartitionInactive."
+Assert-True -Condition ($activePartitionPlan[0].Command -match "Set-Partition") -Message "Active secondary partition remediation should use Set-Partition."
 
 $readyEnableItem = New-BitLockerEnablePlanItem `
     -DriveLetter "C" `
@@ -191,6 +231,16 @@ Assert-True -Condition ($LASTEXITCODE -eq 0 -or $null -eq $LASTEXITCODE) -Messag
 & $launcherPath -Run -Fix -WhatIf -Quiet -NoExitCode | Out-Null
 & $launcherPath -Run -EnableBitLocker -Quiet -NoExitCode | Out-Null
 & $launcherPath -Run -EnableBitLocker -WhatIf -Quiet -NoExitCode | Out-Null
+
+$extensionOut = Join-Path ([System.IO.Path]::GetTempPath()) ("bitdiag-extension-{0}" -f ([guid]::NewGuid()))
+try {
+    & $launcherPath -Run -Format Html -OutFile $extensionOut -Quiet -NoExitCode
+    Assert-True -Condition (Test-Path "$extensionOut.html") -Message "HTML export should append .html when no extension is supplied."
+} finally {
+    if (Test-Path "$extensionOut.html") {
+        Remove-Item -LiteralPath "$extensionOut.html" -Force
+    }
+}
 
 $portablePath = Join-Path ([System.IO.Path]::GetTempPath()) ("bitdiag-portable-{0}.ps1" -f ([guid]::NewGuid()))
 try {
