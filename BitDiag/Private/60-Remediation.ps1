@@ -16,6 +16,10 @@ function New-FixPlanItem {
 
         [string]$Notes,
 
+        [string[]]$Steps,
+
+        [string]$AutoApplyReason,
+
         [string]$Operation,
 
         [string]$DriveLetter,
@@ -38,6 +42,8 @@ function New-FixPlanItem {
         Reason     = $Reason
         Command    = $Command
         Notes      = $Notes
+        Steps      = @($Steps)
+        AutoApplyReason = $AutoApplyReason
         Operation  = $Operation
         DriveLetter = $DriveLetter
     }
@@ -99,13 +105,21 @@ function Get-RemediationPlan {
             if ($result.Message -match "not encrypted|encryption.*off|not protected") {
                 $plan += New-FixPlanItem `
                     -Title "${drive}: enable BitLocker" `
-                    -ActionType "Manual" `
-                    -Reason $result.Message `
-                    -Command "bitdiag -EnableBitLocker -Drives $drive -Apply" `
-                    -Notes "Enable BitLocker only after TPM and boot layout prerequisites are reviewed. After enabling, verify that the recovery password is backed up." `
-                    -DriveLetter $drive `
-                    -ReasonType "EncryptionOff" `
-                    -RiskLevel "High"
+                -ActionType "Manual" `
+                -Reason $result.Message `
+                -Command "bitdiag -EnableBitLocker -Drives $drive -Apply" `
+                -Notes "Enable BitLocker only after TPM and boot layout prerequisites are reviewed. After enabling, verify that the recovery password is backed up." `
+                -AutoApplyReason "Starting disk encryption is a higher-impact action and requires explicit -EnableBitLocker -Apply." `
+                -Steps @(
+                    "Run: bitdiag -EnableBitLocker -Drives $drive",
+                    "Review the ready/blocked/review summary.",
+                    "Resolve any blockers shown in the enablement plan.",
+                    "Run: bitdiag -EnableBitLocker -Drives $drive -Apply",
+                    "After encryption starts, run: bitdiag -Run -Drives $drive"
+                ) `
+                -DriveLetter $drive `
+                -ReasonType "EncryptionOff" `
+                -RiskLevel "High"
                 continue
             }
         }
@@ -172,12 +186,39 @@ function Get-RemediationPlan {
             continue
         }
 
+        if ($result.Category -eq "Platform" -and $result.Message -match "Access denied|access is denied|proper privileges|check failed") {
+            $plan += New-FixPlanItem `
+                -Title "Run platform checks as administrator" `
+                -ActionType "Review" `
+                -Reason $result.Message `
+                -Command "Start PowerShell as Administrator, then run: bitdiag -Run" `
+                -Notes "BitDiag should not recommend firmware or TPM changes until platform checks complete successfully." `
+                -AutoApplyReason "The diagnostic needs elevated platform access before a safe remediation can be selected." `
+                -Steps @(
+                    "Open PowerShell as Administrator.",
+                    "Run: bitdiag -Run",
+                    "Review the updated System section.",
+                    "Generate a fresh remediation plan with: bitdiag -PlanFixes"
+                ) `
+                -ReasonType "Runtime" `
+                -RiskLevel "Medium"
+            continue
+        }
+
         if ($result.CheckName -eq "Secure Boot" -and $result.Status -in @("Warning", "Error")) {
             $plan += New-FixPlanItem `
                 -Title "Review Secure Boot configuration" `
                 -ActionType "Manual" `
                 -Reason $result.Message `
                 -Notes "Secure Boot must be changed in firmware/UEFI settings; do not automate this from BitDiag." `
+                -AutoApplyReason "Secure Boot is controlled by firmware/UEFI and cannot be safely changed by BitDiag." `
+                -Steps @(
+                    "Confirm the device boots in UEFI mode.",
+                    "Restart into firmware/UEFI settings.",
+                    "Enable Secure Boot.",
+                    "Save firmware settings and boot Windows.",
+                    "Run: bitdiag -Run"
+                ) `
                 -ReasonType "Platform" `
                 -RiskLevel "High"
             continue
@@ -190,8 +231,34 @@ function Get-RemediationPlan {
                 -Reason $result.Message `
                 -Command "Confirm TPM 2.0 support in firmware settings." `
                 -Notes "TPM availability is a platform prerequisite for standard BitLocker protection and usually requires firmware, BIOS, or hardware review." `
+                -AutoApplyReason "TPM presence/readiness depends on firmware or hardware state." `
+                -Steps @(
+                    "Run: tpm.msc",
+                    "Confirm TPM is present and ready for use.",
+                    "If TPM is disabled or hidden, enable it in firmware/UEFI settings.",
+                    "Boot Windows and run: bitdiag -Run"
+                ) `
                 -ReasonType "Platform" `
                 -RiskLevel "High"
+            continue
+        }
+
+        if ($result.Category -eq "Disk" -and $result.Message -match "Access denied|access is denied|proper privileges|check failed") {
+            $plan += New-FixPlanItem `
+                -Title "Run disk layout checks as administrator" `
+                -ActionType "Review" `
+                -Reason $result.Message `
+                -Command "Start PowerShell as Administrator, then run: bitdiag -Run" `
+                -Notes "BitDiag should not recommend partition repair steps when the disk layout check itself could not complete." `
+                -AutoApplyReason "The diagnostic needs elevated disk access before a safe remediation can be selected." `
+                -Steps @(
+                    "Open PowerShell as Administrator.",
+                    "Run: bitdiag -Run",
+                    "Review the updated Disk layout section.",
+                    "Generate a fresh remediation plan with: bitdiag -PlanFixes"
+                ) `
+                -ReasonType "Runtime" `
+                -RiskLevel "Medium"
             continue
         }
 
@@ -200,8 +267,16 @@ function Get-RemediationPlan {
                 -Title "Repair or create EFI System Partition" `
                 -ActionType "Manual" `
                 -Reason $result.Message `
-                -Command "bdecfg -target default -size 550" `
+                -Command "BdeHdCfg.exe -target default -size 550" `
                 -Notes "Validate backups first. If the OS volume cannot shrink, review Event Viewer and move or back up blocking files before retrying." `
+                -AutoApplyReason "System partition changes can affect boot and must be reviewed on the target device." `
+                -Steps @(
+                    "Back up the device or confirm a recovery path.",
+                    "Open an elevated PowerShell or Command Prompt.",
+                    "Run: BdeHdCfg.exe -target default -size 550",
+                    "Reboot if Windows asks you to.",
+                    "Run: bitdiag -Run"
+                ) `
                 -ReasonType "DiskLayout" `
                 -RiskLevel "High"
             continue
@@ -214,6 +289,19 @@ function Get-RemediationPlan {
                 -Reason $result.Message `
                 -Command "diskpart -> select disk X -> list partition -> select partition Y -> inactive" `
                 -Notes "Only make a partition inactive after confirming it is not required for boot and backups exist." `
+                -AutoApplyReason "Changing active/inactive partition flags can make Windows unbootable if the wrong partition is selected." `
+                -Steps @(
+                    "Confirm the disk and partition number from Disk Management or BitDiag output.",
+                    "Open an elevated Command Prompt.",
+                    "Run: diskpart",
+                    "Run: list disk",
+                    "Run: select disk X",
+                    "Run: list partition",
+                    "Run: select partition Y",
+                    "Run: inactive",
+                    "Run: exit",
+                    "Run: bitdiag -Run"
+                ) `
                 -ReasonType "DiskLayout" `
                 -RiskLevel "High"
             continue
@@ -225,6 +313,13 @@ function Get-RemediationPlan {
                 -ActionType "Manual" `
                 -Reason $result.Message `
                 -Notes "MBR/GPT conversion, firmware mode changes, and boot partition changes require a separate backup and migration plan." `
+                -AutoApplyReason "Boot mode and partition layout changes can break startup if applied blindly." `
+                -Steps @(
+                    "Back up the device or confirm a recovery path.",
+                    "If conversion is being considered, run: mbr2gpt.exe /validate /allowFullOS",
+                    "Do not convert or change firmware mode until validation succeeds and the migration path is approved.",
+                    "After approved changes, boot Windows and run: bitdiag -Run"
+                ) `
                 -ReasonType "DiskLayout" `
                 -RiskLevel "High"
             continue
@@ -236,6 +331,14 @@ function Get-RemediationPlan {
                 -ActionType "Review" `
                 -Reason $result.Message `
                 -Notes "Policy is usually managed by Group Policy or MDM; review the source of authority before editing registry values." `
+                -AutoApplyReason "BitLocker policy is usually centrally managed and should be changed at the source of authority." `
+                -Steps @(
+                    "Identify whether policy comes from Group Policy, MDM, or local registry.",
+                    "Review the configured BitLocker policy with the endpoint management owner.",
+                    "Apply policy changes from the source of authority.",
+                    "Run: gpupdate /force",
+                    "Run: bitdiag -Run"
+                ) `
                 -ReasonType "Policy" `
                 -RiskLevel "Medium"
             continue
@@ -297,11 +400,23 @@ function Write-RemediationPlan {
         Write-ConsoleLine -Message ("{0,2}. [{1} / {2} / {3}] {4}" -f $index, $item.ActionType, $item.ReasonType, $item.RiskLevel, $item.Title) -ForegroundColor $color -UseColor $UseColor
         Write-ConsoleLine -Message ("    reason  {0}" -f $item.Reason) -ForegroundColor Gray -UseColor $UseColor
         Write-ConsoleLine -Message ("    apply   {0}" -f $applyText) -ForegroundColor Gray -UseColor $UseColor
+        if ($item.AutoApplyReason) {
+            $autoText = if ($item.CanApply) { "yes" } else { "no - $($item.AutoApplyReason)" }
+            Write-ConsoleLine -Message ("    auto    {0}" -f $autoText) -ForegroundColor DarkGray -UseColor $UseColor
+        }
         if ($item.Command) {
             Write-ConsoleLine -Message ("    command {0}" -f $item.Command) -ForegroundColor DarkYellow -UseColor $UseColor
         }
         if ($item.Notes) {
             Write-ConsoleLine -Message ("    notes   {0}" -f $item.Notes) -ForegroundColor DarkGray -UseColor $UseColor
+        }
+        if ($item.Steps -and $item.Steps.Count -gt 0) {
+            Write-ConsoleLine -Message "    steps" -ForegroundColor Gray -UseColor $UseColor
+            $stepIndex = 1
+            foreach ($step in $item.Steps) {
+                Write-ConsoleLine -Message ("      {0}. {1}" -f $stepIndex, $step) -ForegroundColor Gray -UseColor $UseColor
+                $stepIndex++
+            }
         }
         $index++
     }

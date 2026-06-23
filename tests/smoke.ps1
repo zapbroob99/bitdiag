@@ -92,6 +92,53 @@ Assert-True -Condition ($tpmPlan.Count -eq 1) -Message "TPM platform issues shou
 Assert-True -Condition ($tpmPlan[0].ActionType -eq "Manual") -Message "TPM platform issues should be manual remediation."
 Assert-True -Condition ($tpmPlan[0].ReasonType -eq "Platform") -Message "TPM platform issues should be classified as Platform."
 Assert-True -Condition ($tpmPlan[0].RiskLevel -eq "High") -Message "TPM platform issues should be high risk."
+Assert-True -Condition ($tpmPlan[0].AutoApplyReason -match "firmware") -Message "TPM remediation should explain why it is not automatic."
+Assert-True -Condition (@($tpmPlan[0].Steps).Count -gt 0) -Message "TPM remediation should include guided steps."
+
+$espPlan = @(Get-RemediationPlan -Results @(
+    [PSCustomObject]@{
+        Timestamp = "2026-01-01T00:00:00"
+        Category  = "Disk"
+        CheckName = "ESP on disk 0, partition 1"
+        Status    = "Warning"
+        Message   = "ESP on disk 0, partition 1 is missing or invalid."
+        Fix       = "Repair the EFI System Partition."
+        Details   = $null
+    }
+))
+Assert-True -Condition ($espPlan.Count -eq 1) -Message "ESP findings should generate one remediation item."
+Assert-True -Condition ($espPlan[0].Command -match "BdeHdCfg\.exe") -Message "ESP remediation should use BdeHdCfg.exe."
+Assert-True -Condition (@($espPlan[0].Steps).Count -ge 5) -Message "ESP remediation should include guided manual steps."
+Assert-True -Condition ($espPlan[0].AutoApplyReason -match "boot") -Message "ESP remediation should explain why it is not automatic."
+
+$diskAccessPlan = @(Get-RemediationPlan -Results @(
+    [PSCustomObject]@{
+        Timestamp = "2026-01-01T00:00:00"
+        Category  = "Disk"
+        CheckName = "EFI System Partition"
+        Status    = "Error"
+        Message   = "EFI System Partition check failed: Access denied"
+        Fix       = $null
+        Details   = $null
+    }
+))
+Assert-True -Condition ($diskAccessPlan.Count -eq 1) -Message "Disk access failures should generate one remediation item."
+Assert-True -Condition ($diskAccessPlan[0].Title -eq "Run disk layout checks as administrator") -Message "Disk access failures should not be presented as partition repair."
+Assert-True -Condition ($diskAccessPlan[0].Command -notmatch "BdeHdCfg") -Message "Disk access failures should not recommend BdeHdCfg before diagnostics succeed."
+
+$platformAccessPlan = @(Get-RemediationPlan -Results @(
+    [PSCustomObject]@{
+        Timestamp = "2026-01-01T00:00:00"
+        Category  = "Platform"
+        CheckName = "Secure Boot"
+        Status    = "Error"
+        Message   = "Secure Boot check failed: Unable to set proper privileges. Access was denied."
+        Fix       = $null
+        Details   = $null
+    }
+))
+Assert-True -Condition ($platformAccessPlan.Count -eq 1) -Message "Platform access failures should generate one remediation item."
+Assert-True -Condition ($platformAccessPlan[0].Title -eq "Run platform checks as administrator") -Message "Platform access failures should not be presented as firmware changes."
 
 $readyEnableItem = New-BitLockerEnablePlanItem `
     -DriveLetter "C" `

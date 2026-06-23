@@ -204,6 +204,18 @@ The remediation plan classifies each item by action type, reason type, risk leve
 
 When a drive is not encrypted, the default remediation plan focuses on the primary BitLocker enablement action and hides dependent actions such as protection resume, key protector creation, recovery password checks, and escrow checks. Use `-Detailed -PlanFixes` to show every dependent remediation item.
 
+Manual and high-risk remediation items include guided steps when BitDiag should not apply the change automatically. This keeps the menu simple while still showing what to do next:
+
+```text
+auto    no - System partition changes can affect boot and must be reviewed on the target device.
+steps
+  1. Back up the device or confirm a recovery path.
+  2. Open an elevated PowerShell or Command Prompt.
+  3. Run: BdeHdCfg.exe -target default -size 550
+  4. Reboot if Windows asks you to.
+  5. Run: bitdiag -Run
+```
+
 Preview safe automatic fixes without changing the system:
 
 ```powershell
@@ -379,7 +391,7 @@ BitDiag focuses on the common cases that block BitLocker enablement or make prot
 - TPM missing, disabled, not ready, or incompatible with the current boot mode.
 - Legacy BIOS instead of UEFI for modern TPM-based BitLocker.
 - Secure Boot disabled or unavailable.
-- Missing or invalid EFI System Partition, with a manual `bdecfg -target default -size 550` repair recommendation.
+- Missing or invalid EFI System Partition, with a manual `BdeHdCfg.exe -target default -size 550` repair recommendation.
 - Dynamic disk markers.
 - Active MBR partitions, including the drive letter when Windows exposes it.
 - Large unallocated disk ranges or disks without partitions.

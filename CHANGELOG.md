@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.6
+
+- Added guided manual remediation steps for high-risk actions that BitDiag should not apply automatically.
+- Shows why manual actions are not automatically applied when changing firmware, TPM, ESP, active partition, boot layout, or policy state.
+- Corrected the ESP repair recommendation to use `BdeHdCfg.exe -target default -size 550`.
+
 ## 0.7.5
 
 - Refined `-EnableBitLocker` output with a ready/blocked/review summary and clearer apply states.
@@ -43,7 +49,7 @@
 - Added best-effort AD DS recovery escrow visibility check using recovery protector IDs.
 - Added specific findings for fixed/removable write-deny BitLocker policies.
 - Added specific findings for AD DS recovery backup requirement policies.
-- Improved ESP remediation planning with `bdecfg -target default -size 550` as a manual high-risk action.
+- Improved ESP remediation planning with `BdeHdCfg.exe -target default -size 550` as a manual high-risk action.
 - Improved active MBR partition reporting by associating drive letters when available.
 - Data drive BitLocker enablement now plans and applies auto-unlock when the OS drive is fully protected.
 - Enterprise classification now maps ESP, active MBR, and policy-specific findings to clearer reason types.
