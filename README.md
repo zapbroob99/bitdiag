@@ -100,6 +100,13 @@ Generate a single-file script for copy/paste, SCCM, or offline use:
 .\dist\bitdiag.ps1 -Run
 ```
 
+Generate the narrower SCCM-only enterprise report script:
+
+```powershell
+.\build-sccm.ps1
+.\dist\bitdiag-sccm-report.ps1 -OutDirectory "\\server\share\BitDiag" -Quiet
+```
+
 ## Documentation
 
 - [Usage](docs/USAGE.md): interactive mode, examples, parameters, exit codes, and smoke tests.

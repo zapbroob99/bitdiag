@@ -12,6 +12,7 @@ $modulePath = Join-Path $repoRoot "BitDiag\BitDiag.psd1"
 $launcherPath = Join-Path $repoRoot "bitdiag.ps1"
 $diagnosePath = Join-Path $repoRoot "diagnose.ps1"
 $buildPath = Join-Path $repoRoot "build.ps1"
+$sccmBuildPath = Join-Path $repoRoot "build-sccm.ps1"
 
 function Assert-True {
     param(
@@ -254,6 +255,31 @@ try {
 } finally {
     if (Test-Path $portablePath) {
         Remove-Item -LiteralPath $portablePath -Force
+    }
+}
+
+$sccmPortablePath = Join-Path ([System.IO.Path]::GetTempPath()) ("bitdiag-sccm-report-{0}.ps1" -f ([guid]::NewGuid()))
+$sccmOut = Join-Path ([System.IO.Path]::GetTempPath()) ("bitdiag-sccm-smoke-{0}" -f ([guid]::NewGuid()))
+try {
+    & $sccmBuildPath -OutputPath $sccmPortablePath | Out-Null
+    Assert-True -Condition (Test-Path $sccmPortablePath) -Message "SCCM build should create a single-file report script."
+
+    $sccmVersion = & $sccmPortablePath -Version
+    Assert-True -Condition ($sccmVersion -match "^bitdiag-sccm-report\s+\d+\.\d+\.\d+") -Message "SCCM report script should print a semantic version."
+
+    & $sccmPortablePath -OutDirectory $sccmOut -Quiet
+    $sccmReport = Get-ChildItem -Path $sccmOut -Filter *.ndjson | Select-Object -First 1
+    Assert-True -Condition ($null -ne $sccmReport) -Message "SCCM report script should create an NDJSON file."
+
+    $sccmRecord = Get-Content -LiteralPath $sccmReport.FullName | Select-Object -First 1 | ConvertFrom-Json
+    Assert-True -Condition ($null -ne $sccmRecord.RunId) -Message "SCCM enterprise record should include RunId."
+    Assert-True -Condition (-not ($sccmRecord.PSObject.Properties.Name -contains "Details")) -Message "SCCM enterprise record should not include raw Details."
+} finally {
+    if (Test-Path $sccmPortablePath) {
+        Remove-Item -LiteralPath $sccmPortablePath -Force
+    }
+    if (Test-Path $sccmOut) {
+        Remove-Item -LiteralPath $sccmOut -Recurse -Force
     }
 }
 

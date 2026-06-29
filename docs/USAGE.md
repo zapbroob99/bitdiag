@@ -44,6 +44,15 @@ You can run it without installing the module:
 .\dist\bitdiag.ps1 -Run -EnterpriseReport -OutDirectory "\\server\share\BitDiag" -Quiet -NoExitCode
 ```
 
+For SCCM-only reporting, generate the narrower enterprise artifact:
+
+```powershell
+.\build-sccm.ps1
+.\dist\bitdiag-sccm-report.ps1 -OutDirectory "\\server\share\BitDiag" -Quiet
+```
+
+This SCCM script only writes the enterprise NDJSON report. It does not expose remediation, BitLocker enablement, or the interactive menu.
+
 ## Interactive Mode
 
 Run `bitdiag` without arguments to open the menu:
